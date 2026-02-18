@@ -1,0 +1,123 @@
+/* globals.css — Council of LLMs Design System */
+/* Aesthetic: Industrial Command Center — dark, precise, authoritative */
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+:root {
+  /* Core palette */
+  --bg-void:      #07090F;
+  --bg-surface:   #0D1117;
+  --bg-raised:    #141923;
+  --bg-overlay:   #1A2030;
+
+  /* Borders */
+  --border-dim:   rgba(255,255,255,0.05);
+  --border-soft:  rgba(255,255,255,0.10);
+  --border-mid:   rgba(255,255,255,0.18);
+
+  /* Text */
+  --text-primary:   #E8EDF4;
+  --text-secondary: #8895A7;
+  --text-muted:     #3D4A5C;
+  --text-faint:     #232E3D;
+
+  /* Accent: electric teal */
+  --accent:         #00E5C3;
+  --accent-dim:     rgba(0,229,195,0.12);
+  --accent-glow:    rgba(0,229,195,0.25);
+
+  /* Status */
+  --success: #22D07A;
+  --warning: #F5A623;
+  --danger:  #F05A5A;
+  --info:    #4A9EFF;
+
+  /* Typography */
+  --font-display: 'Bebas Neue', sans-serif;
+  --font-body:    'DM Sans', sans-serif;
+  --font-mono:    'IBM Plex Mono', monospace;
+
+  /* Spacing scale */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px; --sp-10: 40px;
+
+  /* Radius */
+  --r-sm: 4px; --r-md: 8px; --r-lg: 12px; --r-xl: 16px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg-overlay); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-mid); }
+
+/* Grid background texture */
+.grid-bg {
+  position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(var(--border-dim) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border-dim) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, black 30%, transparent 100%);
+}
+
+/* Corner decoration */
+.corner-mark {
+  position: fixed; width: 40px; height: 40px;
+  pointer-events: none; z-index: 0; opacity: 0.3;
+}
+.corner-mark.tl { top: 16px; left: 16px; border-top: 1px solid var(--accent); border-left: 1px solid var(--accent); }
+.corner-mark.tr { top: 16px; right: 16px; border-top: 1px solid var(--accent); border-right: 1px solid var(--accent); }
+.corner-mark.bl { bottom: 16px; left: 16px; border-bottom: 1px solid var(--accent); border-left: 1px solid var(--accent); }
+.corner-mark.br { bottom: 16px; right: 16px; border-bottom: 1px solid var(--accent); border-right: 1px solid var(--accent); }
+
+/* Utility classes */
+.display { font-family: var(--font-display); letter-spacing: 2px; }
+.mono { font-family: var(--font-mono); }
+.accent { color: var(--accent); }
+.muted { color: var(--text-muted); }
+.secondary { color: var(--text-secondary); }
+.danger { color: var(--danger); }
+.success { color: var(--success); }
+.warning-text { color: var(--warning); }
+
+/* Animations */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.7); }
+}
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+  50%       { box-shadow: 0 0 16px 4px var(--accent-glow); }
+}
+@keyframes scan-line {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+.fade-in { animation: fade-in 0.35s ease forwards; }
+.slide-up { animation: slide-up 0.4s ease forwards; }
+
+/* Responsive breakpoints */
+@media (max-width: 1024px) { :root { font-size: 13px; } }
+@media (max-width: 768px)  { :root { font-size: 12px; } }
