@@ -3,12 +3,15 @@
  * Central state machine for the Council of LLMs session.
  *
  * Flow:
- *   1. User prompt → sent to ALL enabled providers (OpenAI, Anthropic, Gemini, Copilot)
+ *   1. User prompt (with optional images) → sent to ALL enabled providers
  *   2. Outputs anonymized (crypto shuffle)
- *   3. Judge evaluates all → selects best with in-depth reasoning
- *   4. Reveal: winner + rejection reasons
+ *   3. Judge evaluates all → selects best with multi-dimensional scoring
+ *   4. (Optional) Winning LLM generates combined best-of output
+ *   5. Reveal: winner + per-output metrics + combined output
+ *   6. Session auto-saved to chat history
  *
  * Security: revealMap is never exposed until phase === RESULTS
+ * Reusability: saveSession, loadSession are decoupled and reusable
  */
 
 import { useState, useCallback, useRef } from "react";
@@ -16,12 +19,13 @@ import { callProvider, getEnabledProviders } from "../api/providerRouter.js";
 import { sanitizeOutput, sanitizePrompt } from "../core/sanitizer.js";
 import { PROVIDERS, PROVIDER_MAP, GENERATION_SYSTEM_PROMPT } from "../core/councilConfig.js";
 import { anonymizeOutputs } from "../core/anonymizer.js";
-import { runJudge } from "../core/judge.js";
+import { runJudge, generateCombinedOutput } from "../core/judge.js";
 
 export const PHASES = {
   IDLE: "idle",
   GENERATING: "generating",
   JUDGING: "judging",
+  COMBINING: "combining",   // NEW: generating combined best-of output
   RESULTS: "results",
 };
 
@@ -33,11 +37,49 @@ const INITIAL_STATE = {
   outputs: [],           // { providerId, content, requestId, flaggedPatterns }
   anonymizedOutputs: [], // { label, content }
   verdictBreakdown: null,
+  combinedOutput: null,   // NEW: the synthesized best-of output
   activityLog: [],
   generatingFor: null,
   error: null,
   totalTokensUsed: 0,
+  sessionId: null,
+  attachments: [],        // { filename, originalName, mimeType, base64 }
 };
+
+/**
+ * Save a completed session to the backend.
+ * Reusable: decoupled from the hook so it can be called independently.
+ * @returns {Promise<number|null>} session ID or null on failure
+ */
+async function saveSession({ prompt, purpose, verdictBreakdown, anonymizedOutputs, combinedOutput, attachments }) {
+  try {
+    const res = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${localStorage.getItem('token')}`,
+      },
+      body: JSON.stringify({
+        title: prompt.substring(0, 100).trim(),
+        prompt,
+        purpose,
+        verdictData: verdictBreakdown,
+        outputsData: anonymizedOutputs,
+        combinedOutput,
+        attachments: attachments.map(a => a.filename),
+      }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.id;
+    }
+    console.warn('⚠️ Failed to save session');
+    return null;
+  } catch (err) {
+    console.warn('Failed to save session:', err);
+    return null;
+  }
+}
 
 export function useCouncilSession() {
   const [state, setState] = useState(INITIAL_STATE);
@@ -57,31 +99,47 @@ export function useCouncilSession() {
     setState((s) => ({ ...s, error: err, phase: PHASES.IDLE }));
   }, []);
 
+  const setAttachments = useCallback((attachments) => {
+    setState((s) => ({ ...s, attachments }));
+  }, []);
+
+  /**
+   * Run a full council session.
+   * @param {string} rawPrompt - User's raw prompt
+   * @param {string} purpose - 'code' | 'content' | 'logical'
+   */
   const runSession = useCallback(async (rawPrompt, purpose = 'content') => {
     revealMapRef.current = null;
 
     const enabledIds = await getEnabledProviders();
     if (enabledIds.length === 0) {
-      setError("No API keys configured. Add at least one to .env: VITE_GOOGLE_AI_API_KEY, VITE_GROQ_API_KEY, VITE_OPENROUTER_API_KEY, or VITE_DEEPSEEK_API_KEY");
+      setError("No API keys configured. Add at least one to .env");
       return;
     }
 
     const enabledProviders = PROVIDERS.filter((p) => enabledIds.includes(p.id));
-    setState({ ...INITIAL_STATE, phase: PHASES.GENERATING });
+    const currentAttachments = state.attachments;
+
+    // Prepare images for multimodal: extract base64 data from image attachments
+    const imageAttachments = currentAttachments
+      .filter((a) => a.mimeType?.startsWith("image/") && a.base64)
+      .map((a) => ({ base64: a.base64, mimeType: a.mimeType }));
+
+    setState({ ...INITIAL_STATE, phase: PHASES.GENERATING, attachments: currentAttachments });
 
     // ── Phase 0: Sanitize input ──────────────────────────────────────────
     const { sanitized: sanitizedPrompt, warnings: promptWarnings } = sanitizePrompt(rawPrompt);
-    setState((s) => ({ ...s, sanitizedPrompt, promptWarnings }));
+    setState((s) => ({ ...s, sanitizedPrompt, promptWarnings, prompt: rawPrompt }));
 
     if (promptWarnings.length > 0) {
       promptWarnings.forEach((w) => log(`⚠️ Prompt warning: ${w}`, "warn"));
     }
 
-    log(`🏛️ Council convening — sending prompt to ${enabledProviders.length} providers...`, "info");
+    const imgMsg = imageAttachments.length > 0 ? ` with ${imageAttachments.length} image(s)` : "";
+    log(`🏛️ Council convening — sending prompt${imgMsg} to ${enabledProviders.length} providers...`, "info");
 
-    // ── Phase 1: Generate outputs (parallel) ──────────────────────────────
+    // ── Phase 1: Generate outputs (sequential per provider for UI feedback) ──
     const outputs = [];
-    let totalTokens = 0;
 
     for (const provider of enabledProviders) {
       setState((s) => ({ ...s, generatingFor: provider.id }));
@@ -93,6 +151,7 @@ export function useCouncilSession() {
           user: sanitizedPrompt,
           temperature: 0.7,
           maxTokens: 2000,
+          images: imageAttachments.length > 0 ? imageAttachments : undefined,
         });
 
         const { sanitized, flaggedPatterns } = sanitizeOutput(result.text);
@@ -106,26 +165,31 @@ export function useCouncilSession() {
           requestId: result.requestId,
           flaggedPatterns,
         });
-        totalTokens += result.tokensUsed;
         setState((s) => ({
           ...s,
           outputs: [...s.outputs, { providerId: provider.id, content: sanitized, requestId: result.requestId, flaggedPatterns }],
-          totalTokensUsed: s.totalTokensUsed + result.tokensUsed,
+          totalTokensUsed: s.totalTokensUsed + (result.tokensUsed ?? 0),
         }));
       } catch (err) {
-        setError(`Generation failed for ${provider.name}: ${err.message}`);
-        return;
+        log(`❌ ${provider.name} failed: ${err.message}`, "error");
+        // Continue with remaining providers instead of failing entirely
+        continue;
       }
     }
 
+    if (outputs.length === 0) {
+      setError("All providers failed to generate a response.");
+      return;
+    }
+
     setState((s) => ({ ...s, generatingFor: null }));
-    log(`✅ All ${outputs.length} responses generated. Anonymizing...`);
+    log(`✅ ${outputs.length} response(s) generated. Anonymizing...`);
 
     // ── Phase 2: Anonymize ───────────────────────────────────────────────
-    let anonymizedOutputs, revealMap;
+    let anonymizedOutputsResult, revealMap;
     try {
       const withMemberId = outputs.map((o) => ({ memberId: o.providerId, content: o.content, requestId: o.requestId }));
-      ({ anonymized: anonymizedOutputs, revealMap } = anonymizeOutputs(withMemberId));
+      ({ anonymized: anonymizedOutputsResult, revealMap } = anonymizeOutputs(withMemberId));
       revealMapRef.current = revealMap;
     } catch (err) {
       setError(`Anonymization failed: ${err.message}`);
@@ -135,22 +199,21 @@ export function useCouncilSession() {
     log("🔀 Outputs anonymized. Identities sealed.");
     setState((s) => ({
       ...s,
-      anonymizedOutputs,
+      anonymizedOutputs: anonymizedOutputsResult,
       phase: PHASES.JUDGING,
     }));
 
-    // ── Phase 3: Judge ───────────────────────────────────────────────────
-    log("⚖️ Judge evaluating all submissions...");
+    // ── Phase 3: Judge (with detailed per-output metrics) ────────────────
+    log("⚖️ Judge evaluating all submissions with detailed analysis...");
 
     let judgeResult;
     try {
-      judgeResult = await runJudge(sanitizedPrompt, anonymizedOutputs);
+      judgeResult = await runJudge(sanitizedPrompt, anonymizedOutputsResult);
     } catch (err) {
       setError(`Judge failed: ${err.message}`);
       return;
     }
 
-    totalTokens += judgeResult.tokensUsed;
     const winnerProviderId = revealMapRef.current.get(judgeResult.winner);
     const winnerProvider = PROVIDER_MAP[winnerProviderId];
 
@@ -158,13 +221,12 @@ export function useCouncilSession() {
       winner: {
         label: judgeResult.winner,
         providerId: winnerProviderId,
-        selectionReason: judgeResult.selectionReason,
-        inDepthReasoning: judgeResult.inDepthReasoning,
       },
-      rejections: judgeResult.rejections.map((r) => ({
-        label: r.label,
-        providerId: revealMapRef.current.get(r.label),
-        reason: r.reason,
+      overallAnalysis: judgeResult.overallAnalysis,
+      scores: judgeResult.scores,
+      minorityOpinions: judgeResult.minorityOpinions.map((m) => ({
+        ...m,
+        providerId: revealMapRef.current.get(m.label),
       })),
       revealMap: revealMapRef.current,
     };
@@ -172,11 +234,40 @@ export function useCouncilSession() {
     log(`🏆 Verdict: ${judgeResult.winner} wins`, "success");
     log(`🎭 Identity revealed: ${winnerProvider?.icon} ${winnerProvider?.name}`, "success");
 
+    setState((s) => ({
+      ...s,
+      verdictBreakdown,
+      totalTokensUsed: s.totalTokensUsed + (judgeResult.tokensUsed ?? 0),
+    }));
+
+    // ── Phase 4: Generate combined output ────────────────────────────────
+    setState((s) => ({ ...s, phase: PHASES.COMBINING }));
+    log("🔗 Generating combined best-of output from all submissions...");
+
+    let combinedOutput = null;
+    try {
+      const combineResult = await generateCombinedOutput(
+        sanitizedPrompt,
+        anonymizedOutputsResult,
+        judgeResult.scores,
+        judgeResult.winner
+      );
+      combinedOutput = combineResult.combinedOutput;
+      log("✅ Combined output generated successfully.", "success");
+
+      setState((s) => ({
+        ...s,
+        totalTokensUsed: s.totalTokensUsed + (combineResult.tokensUsed ?? 0),
+      }));
+    } catch (err) {
+      log(`⚠️ Combined output generation failed: ${err.message}. Continuing without it.`, "warn");
+    }
+
     // ── Record deliberation for Admin Stats ─────────────────────────────
     try {
       const recordRes = await fetch('/api/deliberations/record', {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${localStorage.getItem('token')}`
         },
@@ -186,27 +277,78 @@ export function useCouncilSession() {
           providers: enabledIds
         })
       });
-      if (recordRes.ok) {
-        console.log(`✅ Deliberation recorded successfully for purpose: ${purpose}`);
-      } else {
+      if (!recordRes.ok) {
         console.warn('⚠️ Server rejected deliberation record');
       }
     } catch (err) {
       console.warn('Failed to record deliberation statistics:', err);
     }
 
+    // ── Auto-save session to chat history ────────────────────────────────
+    const sessionId = await saveSession({
+      prompt: rawPrompt,
+      purpose,
+      verdictBreakdown,
+      anonymizedOutputs: anonymizedOutputsResult,
+      combinedOutput,
+      attachments: currentAttachments,
+    });
+
     setState((s) => ({
       ...s,
       phase: PHASES.RESULTS,
-      verdictBreakdown,
-      totalTokensUsed: s.totalTokensUsed + judgeResult.tokensUsed,
+      combinedOutput,
+      sessionId,
     }));
-  }, [log, setError]);
+  }, [log, setError, state.attachments]);
+
+  /**
+   * Load a saved session from chat history. Reusable.
+   * @param {object} session - DB session row
+   */
+  const loadSession = useCallback((session) => {
+    revealMapRef.current = null;
+
+    const verdictData = typeof session.verdict_data === 'string'
+      ? JSON.parse(session.verdict_data)
+      : session.verdict_data;
+    const outputsData = typeof session.outputs_data === 'string'
+      ? JSON.parse(session.outputs_data)
+      : session.outputs_data;
+
+    // Rebuild revealMap from verdictBreakdown
+    const revealMap = new Map();
+    if (verdictData?.winner?.providerId) {
+      revealMap.set(verdictData.winner.label, verdictData.winner.providerId);
+    }
+    if (verdictData?.scores) {
+      // Reconstruct from scores if minorityOpinions have provider IDs
+      for (const mo of (verdictData.minorityOpinions ?? [])) {
+        if (mo.providerId) revealMap.set(mo.label, mo.providerId);
+      }
+    }
+    revealMapRef.current = revealMap;
+
+    const verdictBreakdown = {
+      ...verdictData,
+      revealMap,
+    };
+
+    setState({
+      ...INITIAL_STATE,
+      phase: PHASES.RESULTS,
+      prompt: session.prompt,
+      anonymizedOutputs: outputsData ?? [],
+      verdictBreakdown,
+      combinedOutput: session.combined_output ?? verdictData?.combinedOutput ?? null,
+      sessionId: session.id,
+    });
+  }, []);
 
   const reset = useCallback(() => {
     revealMapRef.current = null;
     setState(INITIAL_STATE);
   }, []);
 
-  return { state, runSession, reset };
+  return { state, runSession, reset, loadSession, setAttachments };
 }

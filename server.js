@@ -3,18 +3,30 @@
  * Secure backend proxy for Council of LLMs
  * 
  * CRITICAL: All API keys MUST stay server-side only.
+ * 
+ * Endpoints:
+ * - POST /api/auth/register, /api/auth/login, GET /api/auth/me
+ * - POST /api/generate (multi-provider LLM calls)
+ * - POST /api/deliberations/record
+ * - GET /api/admin/stats
+ * - GET/POST/DELETE /api/sessions (chat history CRUD)
+ * - POST /api/upload (file upload with multer)
+ * - GET /api/uploads/:filename (serve uploaded files)
+ * - GET /api/health
  */
 
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { body, validationResult } from 'express-validator';
+import { body, param, query, validationResult } from 'express-validator';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import db from './database.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -35,7 +47,7 @@ app.use(express.json({ limit: '10mb' }));
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 20,
+  max: 30, // Increased slightly for new endpoints
   message: { error: 'Too many requests. Please wait 1 minute.' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -43,6 +55,23 @@ const limiter = rateLimit({
 app.use('/api', limiter);
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-fallback-secret-key-change-this';
+
+// ── UPLOADS DIRECTORY ─────────────────────────────────────────────
+const UPLOADS_DIR = path.resolve(__dirname, 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
+// Allowed file types for upload
+const ALLOWED_MIME_TYPES = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+  'text/plain', 'text/markdown', 'text/csv',
+  'application/json', 'application/pdf',
+  'text/javascript', 'text/typescript', 'text/html', 'text/css',
+  'application/x-python', 'text/x-python',
+]);
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_FILES_PER_SESSION = 5;
 
 // ── AUTH MIDDLEWARE ────────────────────────────────────────────────
 const authenticateToken = (req, res, next) => {
@@ -72,7 +101,6 @@ const missingKeys = REQUIRED_ENV.filter(key => !process.env[key]);
 
 if (missingKeys.length === REQUIRED_ENV.length) {
   console.error(`❌ FATAL: Missing ALL API keys in .env file. At least one of ${REQUIRED_ENV.join(', ')} is required.`);
-  // We don't exit here to allow the dev to see the error in the console and fix it
 } else if (missingKeys.length > 0) {
   console.warn(`⚠️ Warning: Missing API keys: ${missingKeys.join(', ')}. Some providers will be disabled.`);
 }
@@ -123,7 +151,9 @@ const validateGenerate = [
     .withMessage('Temperature must be 0-2'),
 ];
 
-// ── ROUTES ─────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// ── AUTH ROUTES ────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
 
 app.post('/api/auth/register', [
   body('email').isEmail().withMessage('Invalid email format').normalizeEmail(),
@@ -177,10 +207,14 @@ app.get('/api/auth/me', authenticateToken, (req, res) => {
   res.json({ user: req.user });
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ── ADMIN ROUTES ──────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+
 app.get('/api/admin/stats', authenticateToken, isAdmin, (req, res) => {
   try {
     const totalSessions = db.prepare('SELECT count(*) as count FROM deliberations').get().count;
-    
+
     const acceptanceRates = db.prepare(`
       SELECT winner_id, count(*) as wins, 
       (count(*) * 100.0 / (SELECT count(*) FROM deliberations)) as rate
@@ -235,6 +269,10 @@ app.get('/api/admin/stats', authenticateToken, isAdmin, (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ── DELIBERATION ROUTES ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+
 app.post('/api/deliberations/record', authenticateToken, [
   body('purpose').isIn(['code', 'content', 'logical']).withMessage('Invalid purpose'),
   body('winnerId').isString().notEmpty(),
@@ -257,22 +295,280 @@ app.post('/api/deliberations/record', authenticateToken, [
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ── CHAT SESSION ROUTES (DB-backed history) ───────────────────────
+// ═══════════════════════════════════════════════════════════════════
+
+/** GET /api/sessions — List all sessions for the authenticated user */
+app.get('/api/sessions', authenticateToken, [
+  query('page').optional().isInt({ min: 1 }).toInt(),
+  query('limit').optional().isInt({ min: 1, max: 50 }).toInt(),
+], (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
+  const page = req.query.page || 1;
+  const limit = req.query.limit || 20;
+  const offset = (page - 1) * limit;
+
+  try {
+    const total = db.prepare(
+      'SELECT count(*) as count FROM chat_sessions WHERE user_id = ?'
+    ).get(req.user.id).count;
+
+    const sessions = db.prepare(`
+      SELECT id, title, prompt, purpose, verdict_data, created_at
+      FROM chat_sessions
+      WHERE user_id = ?
+      ORDER BY created_at DESC
+      LIMIT ? OFFSET ?
+    `).all(req.user.id, limit, offset);
+
+    res.json({ sessions, total, page, limit });
+  } catch (err) {
+    log('error', 'List sessions error', { error: err.message });
+    res.status(500).json({ error: 'Failed to list sessions' });
+  }
+});
+
+/** GET /api/sessions/:id — Get a full session with verdict + outputs */
+app.get('/api/sessions/:id', authenticateToken, [
+  param('id').isInt().toInt(),
+], (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
+  try {
+    const session = db.prepare(`
+      SELECT * FROM chat_sessions WHERE id = ? AND user_id = ?
+    `).get(req.params.id, req.user.id);
+
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    // Fetch attachments
+    const attachments = db.prepare(
+      'SELECT id, filename, original_name, mime_type, size_bytes, created_at FROM chat_attachments WHERE session_id = ?'
+    ).all(session.id);
+
+    res.json({ ...session, attachments });
+  } catch (err) {
+    log('error', 'Get session error', { error: err.message });
+    res.status(500).json({ error: 'Failed to get session' });
+  }
+});
+
+/** POST /api/sessions — Save a new completed session */
+app.post('/api/sessions', authenticateToken, [
+  body('title').isString().trim().isLength({ min: 1, max: 200 }).withMessage('Title required (max 200 chars)'),
+  body('prompt').isString().trim().isLength({ min: 1, max: 15000 }).withMessage('Prompt required'),
+  body('purpose').optional().isIn(['code', 'content', 'logical']),
+  body('verdictData').optional().isObject(),
+  body('outputsData').optional().isArray(),
+  body('attachments').optional().isArray(),
+], (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
+  const { title, prompt, purpose, verdictData, outputsData, attachments } = req.body;
+
+  try {
+    // Serialize verdict and outputs, stripping the Map (revealMap) since it can't be serialized
+    const verdictForStorage = verdictData ? { ...verdictData } : null;
+    if (verdictForStorage) {
+      delete verdictForStorage.revealMap; // Maps can't be JSON-serialized
+    }
+
+    const result = db.prepare(`
+      INSERT INTO chat_sessions (user_id, title, prompt, purpose, verdict_data, outputs_data)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      req.user.id,
+      title,
+      prompt,
+      purpose ?? 'content',
+      verdictForStorage ? JSON.stringify(verdictForStorage) : null,
+      outputsData ? JSON.stringify(outputsData) : null
+    );
+
+    const sessionId = result.lastInsertRowid;
+
+    // Link attachments if provided
+    if (attachments && attachments.length > 0) {
+      const insertAttachment = db.prepare(`
+        INSERT INTO chat_attachments (session_id, filename, original_name, mime_type, size_bytes)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+
+      for (const filename of attachments) {
+        // Look up file info from uploads directory
+        const filePath = path.join(UPLOADS_DIR, filename);
+        if (fs.existsSync(filePath)) {
+          const stats = fs.statSync(filePath);
+          insertAttachment.run(sessionId, filename, filename, null, stats.size);
+        }
+      }
+    }
+
+    log('info', 'Session saved', { user: req.user.email, sessionId });
+    res.status(201).json({ id: sessionId, status: 'saved' });
+  } catch (err) {
+    log('error', 'Save session error', { error: err.message });
+    res.status(500).json({ error: 'Failed to save session' });
+  }
+});
+
+/** DELETE /api/sessions/:id — Delete a session and its attachments */
+app.delete('/api/sessions/:id', authenticateToken, [
+  param('id').isInt().toInt(),
+], (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
+  try {
+    // Verify ownership
+    const session = db.prepare(
+      'SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?'
+    ).get(req.params.id, req.user.id);
+
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    // Delete attachments files
+    const attachments = db.prepare(
+      'SELECT filename FROM chat_attachments WHERE session_id = ?'
+    ).all(session.id);
+
+    for (const att of attachments) {
+      const filePath = path.join(UPLOADS_DIR, att.filename);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+
+    // Delete from DB (cascades to chat_attachments)
+    db.prepare('DELETE FROM chat_attachments WHERE session_id = ?').run(session.id);
+    db.prepare('DELETE FROM chat_sessions WHERE id = ?').run(session.id);
+
+    log('info', 'Session deleted', { user: req.user.email, sessionId: session.id });
+    res.json({ status: 'deleted' });
+  } catch (err) {
+    log('error', 'Delete session error', { error: err.message });
+    res.status(500).json({ error: 'Failed to delete session' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// ── FILE UPLOAD ROUTES ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+
+/** POST /api/upload — Upload a file (manual multipart handling to avoid multer dep) */
+app.post('/api/upload', authenticateToken, async (req, res) => {
+  const contentType = req.headers['content-type'] || '';
+
+  // Handle base64-encoded JSON upload (simpler alternative to multipart)
+  if (contentType.includes('application/json')) {
+    const { fileName, fileData, mimeType } = req.body;
+
+    if (!fileName || !fileData) {
+      return res.status(400).json({ error: 'fileName and fileData (base64) are required' });
+    }
+
+    // Validate mime type
+    if (mimeType && !ALLOWED_MIME_TYPES.has(mimeType)) {
+      return res.status(400).json({ error: `File type not allowed: ${mimeType}` });
+    }
+
+    // Validate file name (prevent path traversal)
+    const sanitizedName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
+
+    try {
+      const buffer = Buffer.from(fileData, 'base64');
+
+      // Check file size
+      if (buffer.length > MAX_FILE_SIZE) {
+        return res.status(400).json({ error: `File too large. Max size: ${MAX_FILE_SIZE / 1024 / 1024}MB` });
+      }
+
+      // Generate unique filename
+      const ext = path.extname(sanitizedName);
+      const uniqueName = `${crypto.randomUUID()}${ext}`;
+      const filePath = path.join(UPLOADS_DIR, uniqueName);
+
+      fs.writeFileSync(filePath, buffer);
+
+      log('info', 'File uploaded', { user: req.user.email, filename: uniqueName, size: buffer.length });
+
+      res.status(201).json({
+        filename: uniqueName,
+        originalName: sanitizedName,
+        mimeType: mimeType || 'application/octet-stream',
+        sizeBytes: buffer.length,
+      });
+    } catch (err) {
+      log('error', 'File upload error', { error: err.message });
+      res.status(500).json({ error: 'Failed to upload file' });
+    }
+  } else {
+    res.status(400).json({ error: 'Send file as JSON with base64-encoded fileData' });
+  }
+});
+
+/** GET /api/uploads/:filename — Serve uploaded files */
+app.get('/api/uploads/:filename', authenticateToken, (req, res) => {
+  const filename = path.basename(req.params.filename); // Prevent path traversal
+  const filePath = path.join(UPLOADS_DIR, filename);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  res.sendFile(filePath);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// ── GENERATE ROUTE ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+
 app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({ error: errors.array()[0].msg });
   }
 
-  const { prompt, providers = ['gemini', 'groq', 'openrouter'], temperature = 0.7 } = req.body;
-  
-  const sanitized = sanitizeInput(prompt);
-  if (!sanitized.safe) {
-    console.warn(`[SECURITY] Sanitizer blocked input. Reason: ${sanitized.reason}`);
-    return res.status(400).json({ error: `Unsafe input detected: ${sanitized.reason}` });
+  const { prompt, providers = ['gemini', 'groq', 'openrouter'], temperature = 0.7, images, system, maxTokens, skipSanitize } = req.body;
+
+  // Use provided system prompt or default
+  const systemPrompt = typeof system === 'string' && system.length > 0 ? system : 'You are a helpful assistant.';
+  const effectiveMaxTokens = typeof maxTokens === 'number' ? Math.min(maxTokens, 8000) : 2000;
+
+  // skipSanitize: used by internal judge/combination calls that need raw output
+  const shouldSanitize = !skipSanitize;
+
+  let cleanedPrompt = prompt;
+  if (shouldSanitize) {
+    const sanitized = sanitizeInput(prompt);
+    if (!sanitized.safe) {
+      console.warn(`[SECURITY] Sanitizer blocked input. Reason: ${sanitized.reason}`);
+      return res.status(400).json({ error: `Unsafe input detected: ${sanitized.reason}` });
+    }
+    cleanedPrompt = sanitized.cleaned;
   }
 
+  // Validate images if present (security: limit count and size)
+  const validatedImages = [];
+  if (images && Array.isArray(images)) {
+    for (const img of images.slice(0, 5)) { // Max 5 images
+      if (img.base64 && img.mimeType && img.mimeType.startsWith('image/')) {
+        // Ensure base64 isn't absurdly large (max ~15MB decoded)
+        if (img.base64.length <= 20_000_000) {
+          validatedImages.push({ base64: img.base64, mimeType: img.mimeType });
+        }
+      }
+    }
+  }
+
+  const hasImages = validatedImages.length > 0;
   const startTime = Date.now();
-  log('info', 'Generation started', { providers, promptLength: prompt.length });
+  log('info', 'Generation started', { providers, promptLength: prompt.length, imageCount: validatedImages.length });
 
   try {
     const wrappedCall = async (providerId, fn) => {
@@ -301,29 +597,32 @@ app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) 
     const calls = [];
     if (providers.includes('gemini') && process.env.GOOGLE_AI_API_KEY) {
       calls.push(wrappedCall('gemini', () => callGemini({
-        system: 'You are a helpful assistant.',
-        user: sanitized.cleaned,
+        system: systemPrompt,
+        user: cleanedPrompt,
         temperature,
-        maxTokens: 2000,
+        maxTokens: effectiveMaxTokens,
         providerId: 'gemini',
+        images: hasImages ? validatedImages : undefined,
       })));
     }
     if (providers.includes('groq') && process.env.GROQ_API_KEY) {
       calls.push(wrappedCall('groq', () => callGroq({
-        system: 'You are a helpful assistant.',
-        user: sanitized.cleaned,
+        system: systemPrompt,
+        user: cleanedPrompt,
         temperature,
-        maxTokens: 2000,
+        maxTokens: effectiveMaxTokens,
         providerId: 'groq',
+        images: hasImages ? validatedImages : undefined,
       })));
     }
     if (providers.includes('openrouter') && process.env.OPENROUTER_API_KEY) {
       calls.push(wrappedCall('openrouter', () => callOpenRouter({
-        system: 'You are a helpful assistant.',
-        user: sanitized.cleaned,
+        system: systemPrompt,
+        user: cleanedPrompt,
         temperature,
-        maxTokens: 1200,
+        maxTokens: effectiveMaxTokens,
         providerId: 'openrouter',
+        images: hasImages ? validatedImages : undefined,
       })));
     }
 
@@ -338,14 +637,14 @@ app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) 
       });
     }
 
-    const sanitizedOutputs = successes.map(r => ({
+    const outputList = successes.map(r => ({
       ...r,
-      text: sanitizeOutput(r.text).cleaned,
+      text: shouldSanitize ? sanitizeOutput(r.text).cleaned : r.text,
     }));
 
     const elapsed = Date.now() - startTime;
     res.json({
-      outputs: sanitizedOutputs,
+      outputs: outputList,
       failures: failures.map(f => ({ provider: f.providerId, error: f.error })),
       metadata: { elapsedMs: elapsed, providersQueried: providers.length },
     });
@@ -355,9 +654,13 @@ app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) 
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// ── HEALTH & STATIC SERVING ───────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     providers: {
       gemini: !!process.env.GOOGLE_AI_API_KEY,

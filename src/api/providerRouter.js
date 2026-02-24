@@ -14,17 +14,22 @@ const API_BASE = '/api'; // Proxied to localhost:3001 in dev (see vite.config.js
  * @param {string} params.prompt - User prompt
  * @param {string[]} [params.providers] - Which providers to call (default: all)
  * @param {number} [params.temperature] - LLM temperature 0-2 (default: 0.7)
+ * @param {Array<{base64: string, mimeType: string}>} [params.images] - Images to send
  * @returns {Promise<{
  *   outputs: Array<{text: string, requestId: string, tokensUsed: number, providerId: string}>,
  *   failures: Array<{provider: string, error: string}>,
  *   metadata: {elapsedMs: number, providersQueried: number}
  * }>}
  */
-export async function generateFromProviders({ 
-  prompt, 
+export async function generateFromProviders({
+  prompt,
   user,
-  providers = ['gemini', 'groq', 'openrouter'], 
-  temperature = 0.7 
+  system,
+  providers = ['gemini', 'groq', 'openrouter'],
+  temperature = 0.7,
+  maxTokens,
+  images,
+  skipSanitize,
 }) {
   const actualPrompt = prompt || user;
   if (!actualPrompt) {
@@ -34,14 +39,18 @@ export async function generateFromProviders({
 
   const response = await fetch(`${API_BASE}/generate`, {
     method: 'POST',
-    headers: { 
+    headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${localStorage.getItem('token')}`
     },
-    body: JSON.stringify({ 
-      prompt: actualPrompt, 
-      providers, 
-      temperature 
+    body: JSON.stringify({
+      prompt: actualPrompt,
+      providers,
+      temperature,
+      images,          // Forward images to backend
+      system,          // Forward custom system prompt (judge uses this)
+      maxTokens,       // Forward custom max tokens (judge needs 5000+)
+      skipSanitize,    // Skip sanitization for internal calls (judge/combo)
     }),
   });
 
@@ -69,22 +78,21 @@ export async function getEnabledProviders() {
 
 /**
  * Call a specific provider (used by judge/deliberation for targeted calls).
+ * Reusable: passes arbitrary params through to generateFromProviders.
  * @param {string} providerId - 'gemini', 'groq', or 'openrouter'
  * @param {object} params - Same as generateFromProviders
  * @returns {Promise<{text: string, requestId: string, tokensUsed: number}>}
  */
 export async function callProvider(providerId, params) {
-  // 'params' usually contains { system, user, temperature, ... }
-  // We need to pass this through to generateFromProviders which expects { prompt, user, ... }
-  const result = await generateFromProviders({ 
-    ...params, 
-    providers: [providerId] 
+  const result = await generateFromProviders({
+    ...params,
+    providers: [providerId]
   });
-  
+
   if (result.outputs.length === 0) {
     const failure = result.failures[0];
     throw new Error(failure?.error || 'Provider failed');
   }
-  
+
   return result.outputs[0];
 }

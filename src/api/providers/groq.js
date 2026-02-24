@@ -1,7 +1,8 @@
 /**
  * groq.js
  * Groq API client - fast free inference.
- * Default: Llama 3.3 70B Versatile. Override with VITE_GROQ_MODEL.
+ * Supports multimodal inputs (text + images via data URLs).
+ * Default: Llama 3.3 70B Versatile. Override with GROQ_MODEL.
  */
 
 const API_URL = "https://api.groq.com/openai/v1/chat/completions";
@@ -31,20 +32,59 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
-export async function callGroq({ system, user, temperature = 0.7, maxTokens = 1200, providerId = "groq" }) {
+/**
+ * Build user message content with optional images (OpenAI vision format).
+ * @param {string} text
+ * @param {Array<{base64: string, mimeType: string}>} [images]
+ * @returns {string|Array<object>}
+ */
+function buildUserContent(text, images) {
+  if (!images || images.length === 0) return text;
+
+  const contentParts = [];
+  for (const img of images) {
+    contentParts.push({
+      type: "image_url",
+      image_url: {
+        url: `data:${img.mimeType};base64,${img.base64}`,
+      },
+    });
+  }
+  contentParts.push({ type: "text", text });
+  return contentParts;
+}
+
+/**
+ * @param {object} params
+ * @param {string} params.system
+ * @param {string} params.user
+ * @param {number} params.temperature
+ * @param {number} params.maxTokens
+ * @param {string} params.providerId
+ * @param {Array<{base64: string, mimeType: string}>} [params.images]
+ * @returns {Promise<{text: string, requestId: string, tokensUsed: number}>}
+ */
+export async function callGroq({ system, user, temperature = 0.7, maxTokens = 1200, providerId = "groq", images }) {
   const apiKey = (typeof process !== 'undefined' ? process.env.GROQ_API_KEY || process.env.VITE_GROQ_API_KEY : import.meta.env?.VITE_GROQ_API_KEY) ?? "";
   if (!apiKey) {
-    throw new Error("Groq API key not configured. Add VITE_GROQ_API_KEY to .env");
+    throw new Error("Groq API key not configured. Add GROQ_API_KEY to .env");
   }
 
   const requestId = newRequestId();
-  const model = (typeof process !== 'undefined' ? process.env.GROQ_MODEL || process.env.VITE_GROQ_MODEL : import.meta.env?.VITE_GROQ_MODEL) ?? "llama-3.3-70b-versatile";
+  let model = (typeof process !== 'undefined' ? process.env.GROQ_MODEL || process.env.VITE_GROQ_MODEL : import.meta.env?.VITE_GROQ_MODEL) ?? "llama-3.3-70b-versatile";
+
+  // Use vision-capable model if images are provided and current model doesn't support vision
+  if (images && images.length > 0 && !model.includes('vision')) {
+    model = "llama-3.2-90b-vision-preview";
+    console.log(`[${requestId}] Switching to vision model: ${model}`);
+  }
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
+      const userContent = buildUserContent(user, images);
       const messages = [
         { role: "system", content: system },
-        { role: "user", content: user },
+        { role: "user", content: userContent },
       ];
 
       const response = await fetchWithTimeout(

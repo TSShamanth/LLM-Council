@@ -1,12 +1,12 @@
 /**
  * gemini.js
  * Google Gemini API client for Council of LLMs.
- * Requires VITE_GOOGLE_AI_API_KEY in .env (or backend proxy).
+ * Supports multimodal inputs (text + images).
  * Uses Gemini 2.5 Flash by default.
  */
 
 const BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
-const REQUEST_TIMEOUT_MS = 45_000;
+const REQUEST_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1_000;
 
@@ -33,17 +33,46 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 }
 
 /**
+ * Build user message parts including images if provided.
+ * @param {string} systemPrompt
+ * @param {string} userPrompt
+ * @param {Array<{base64: string, mimeType: string}>} [images]
+ * @returns {Array<object>} parts array for Gemini API
+ */
+function buildParts(systemPrompt, userPrompt, images) {
+  const parts = [];
+
+  // Add images first (Gemini likes images before text)
+  if (images && images.length > 0) {
+    for (const img of images) {
+      parts.push({
+        inlineData: {
+          mimeType: img.mimeType,
+          data: img.base64,
+        },
+      });
+    }
+  }
+
+  // Add text prompt
+  parts.push({ text: `${systemPrompt}\n\n${userPrompt}` });
+
+  return parts;
+}
+
+/**
  * @param {object} params
  * @param {string} params.system
  * @param {string} params.user
  * @param {number} params.temperature
  * @param {number} params.maxTokens
  * @param {string} params.providerId
+ * @param {Array<{base64: string, mimeType: string}>} [params.images] - Base64-encoded images
  * @returns {Promise<{text: string, requestId: string, tokensUsed: number}>}
  */
-export async function callGemini({ system, user, temperature = 0.7, maxTokens = 1200, providerId = "gemini" }) {
+export async function callGemini({ system, user, temperature = 0.7, maxTokens = 1200, providerId = "gemini", images }) {
   let apiKey = (typeof process !== 'undefined' ? process.env.GOOGLE_AI_API_KEY || process.env.VITE_GOOGLE_AI_API_KEY : import.meta.env?.VITE_GOOGLE_AI_API_KEY) ?? "";
-  
+
   // Clean key: trim whitespace and remove potential quotes
   apiKey = apiKey ? apiKey.trim().replace(/^["'](.+)["']$/, '$1') : "";
 
@@ -52,12 +81,10 @@ export async function callGemini({ system, user, temperature = 0.7, maxTokens = 
   }
 
   const requestId = newRequestId();
-  
+
   // Log first/last 3 chars for debugging (safely masked)
   if (typeof process !== 'undefined' && apiKey.length >= 6) {
     console.log(`[${requestId}] Using key: ${apiKey.substring(0, 3)}...${apiKey.substring(apiKey.length - 3)}`);
-  } else if (typeof process !== 'undefined' && apiKey) {
-    console.log(`[${requestId}] Using key: (short key detected)`);
   }
 
   const model = (typeof process !== 'undefined' ? process.env.GOOGLE_AI_MODEL || process.env.VITE_GOOGLE_AI_MODEL : import.meta.env?.VITE_GOOGLE_AI_MODEL) ?? "gemini-2.0-flash";
@@ -65,9 +92,8 @@ export async function callGemini({ system, user, temperature = 0.7, maxTokens = 
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const contents = [
-        { role: "user", parts: [{ text: `${system}\n\n${user}` }] },
-      ];
+      const parts = buildParts(system, user, images);
+      const contents = [{ role: "user", parts }];
 
       const response = await fetchWithTimeout(
         url,

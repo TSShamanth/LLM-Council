@@ -1,7 +1,8 @@
 /**
  * openrouter.js
  * OpenRouter API — matches https://openrouter.ai/docs/quickstart
- * Default: Qwen3 Coder 480B. Override with VITE_OPENROUTER_MODEL.
+ * Supports multimodal inputs (text + images via data URLs).
+ * Default: Qwen3 Coder 480B. Override with OPENROUTER_MODEL.
  */
 
 const isServer = typeof process !== 'undefined' && process.env && !process.browser;
@@ -33,15 +34,38 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
+/**
+ * Build user message content with optional images (OpenAI vision format).
+ * @param {string} text
+ * @param {Array<{base64: string, mimeType: string}>} [images]
+ * @returns {string|Array<object>}
+ */
+function buildUserContent(text, images) {
+  if (!images || images.length === 0) return text;
+
+  const contentParts = [];
+  for (const img of images) {
+    contentParts.push({
+      type: "image_url",
+      image_url: {
+        url: `data:${img.mimeType};base64,${img.base64}`,
+      },
+    });
+  }
+  contentParts.push({ type: "text", text });
+  return contentParts;
+}
+
 export async function callOpenRouter({
   system,
   user,
   temperature = 0.7,
   maxTokens = 1200,
   providerId = "openrouter",
+  images,
 }) {
   let apiKey = (typeof process !== 'undefined' ? process.env.OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY : import.meta.env?.VITE_OPENROUTER_API_KEY) ?? "";
-  
+
   // Clean key
   apiKey = apiKey ? apiKey.trim().replace(/^["'](.+)["']$/, '$1') : "";
 
@@ -50,7 +74,7 @@ export async function callOpenRouter({
   }
 
   const requestId = newRequestId();
-  
+
   // Log first/last 3 chars for debugging (safely masked)
   if (typeof process !== 'undefined' && apiKey.length >= 6) {
     console.log(`[${requestId}] Using key: ${apiKey.substring(0, 3)}...${apiKey.substring(apiKey.length - 3)}`);
@@ -63,9 +87,10 @@ export async function callOpenRouter({
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
+      const userContent = buildUserContent(user, images);
       const messages = [
         { role: "system", content: system },
-        { role: "user", content: user },
+        { role: "user", content: userContent },
       ];
 
       const response = await fetchWithTimeout(
@@ -100,7 +125,7 @@ export async function callOpenRouter({
       if (!response.ok) {
         const errBody = await response.text();
         let errMsg = `OpenRouter API error ${response.status}: ${errBody}`;
-        if (response.status === 401) errMsg = "OpenRouter: Invalid API key (401). Check VITE_OPENROUTER_API_KEY.";
+        if (response.status === 401) errMsg = "OpenRouter: Invalid API key (401). Check OPENROUTER_API_KEY.";
         if (response.status === 402) errMsg = "OpenRouter: Credits exhausted (402). Check openrouter.ai/credits.";
         if (response.status === 404) errMsg = `OpenRouter: Model "${model}" not found (404). Try meta-llama/llama-3.2-3b-instruct:free`;
         throw new Error(errMsg);

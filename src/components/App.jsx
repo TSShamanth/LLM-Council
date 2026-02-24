@@ -1,8 +1,8 @@
 /**
  * App.jsx
  * Root component — wires all pieces together.
- * Tab navigation: Submissions | Verdict
- * Multi-provider: OpenAI, Anthropic, Gemini, Copilot.
+ * Tab navigation: Submissions | Verdict | Diff | History
+ * Multi-provider: Gemini, Groq, OpenRouter.
  */
 import { useState, useEffect } from "react";
 import "../styles/globals.css";
@@ -13,6 +13,8 @@ import ProviderStatus from "./ProviderStatus.jsx";
 import PromptInput from "./PromptInput.jsx";
 import OutputCard from "./OutputCard.jsx";
 import VerdictScreen from "./VerdictScreen.jsx";
+import OutputDiffView from "./OutputDiffView.jsx";
+import ChatHistory from "./ChatHistory.jsx";
 import ActivityLog from "./ActivityLog.jsx";
 import AuthForm from "./AuthForm.jsx";
 import AdminDashboard from "./AdminDashboard.jsx";
@@ -20,13 +22,15 @@ import AdminDashboard from "./AdminDashboard.jsx";
 const TABS = [
   { id: "outputs", label: "SUBMISSIONS", icon: "◧" },
   { id: "verdict", label: "VERDICT", icon: "⬡" },
+  { id: "diff", label: "DIFF", icon: "◫" },
 ];
 
 export default function App() {
-  const { state, runSession, reset } = useCouncilSession();
+  const { state, runSession, reset, loadSession, setAttachments } = useCouncilSession();
   const { user, loading } = useAuth();
   const [activeTab, setActiveTab] = useState("outputs");
   const [view, setView] = useState("council"); // 'council' or 'admin'
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const {
     phase,
@@ -34,10 +38,13 @@ export default function App() {
     anonymizedOutputs,
     outputs,
     verdictBreakdown,
+    combinedOutput,
     activityLog,
     generatingFor,
     totalTokensUsed,
     error,
+    sessionId,
+    attachments,
   } = state;
 
   const completedGenerating = new Set(outputs.map((o) => o.providerId));
@@ -51,8 +58,15 @@ export default function App() {
 
   useEffect(() => {
     if (phase === PHASES.JUDGING) setActiveTab("verdict");
+    if (phase === PHASES.COMBINING) setActiveTab("verdict");
     if (phase === PHASES.RESULTS) setActiveTab("verdict");
   }, [phase]);
+
+  const handleLoadSession = (session) => {
+    loadSession(session);
+    setHistoryOpen(false);
+    setActiveTab("verdict");
+  };
 
   if (loading) {
     return (
@@ -81,7 +95,8 @@ export default function App() {
   const isIdle = phase === PHASES.IDLE;
   const isActive = !isIdle;
   const showOutputsTab = anonymizedOutputs.length > 0;
-  const showVerdictTab = phase === PHASES.RESULTS && verdictBreakdown;
+  const showVerdictTab = (phase === PHASES.RESULTS || phase === PHASES.COMBINING) && verdictBreakdown;
+  const showDiffTab = phase === PHASES.RESULTS && anonymizedOutputs.length >= 2;
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg-void)", display: "flex", flexDirection: "column" }}>
@@ -93,48 +108,81 @@ export default function App() {
 
       <CouncilHeader phase={phase} totalTokensUsed={totalTokensUsed} onReset={reset} />
 
-      {/* Admin Toggle */}
-      {user.role === 'admin' && (
-        <div style={{ 
-          padding: '10px var(--sp-8)', 
-          background: 'var(--bg-surface)', 
-          borderBottom: '1px solid var(--border-soft)',
-          display: 'flex',
-          gap: 'var(--sp-4)',
-          zIndex: 10
-        }}>
-          <button 
-            onClick={() => setView('council')}
-            style={{
-              background: view === 'council' ? 'var(--accent)' : 'transparent',
-              color: view === 'council' ? 'var(--bg-void)' : 'var(--text-muted)',
-              border: '1px solid var(--border-soft)',
-              padding: '4px 12px',
-              borderRadius: 'var(--r-md)',
-              fontSize: '10px',
-              fontFamily: 'var(--font-mono)',
-              cursor: 'pointer'
-            }}
-          >
-            COUNCIL INTERFACE
-          </button>
-          <button 
-            onClick={() => setView('admin')}
-            style={{
-              background: view === 'admin' ? 'var(--warning)' : 'transparent',
-              color: view === 'admin' ? 'var(--bg-void)' : 'var(--text-muted)',
-              border: '1px solid var(--border-soft)',
-              padding: '4px 12px',
-              borderRadius: 'var(--r-md)',
-              fontSize: '10px',
-              fontFamily: 'var(--font-mono)',
-              cursor: 'pointer'
-            }}
-          >
-            ADMIN DASHBOARD
-          </button>
+      {/* Admin Toggle + History Button */}
+      <div style={{
+        padding: '10px var(--sp-8)',
+        background: 'var(--bg-surface)',
+        borderBottom: '1px solid var(--border-soft)',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        zIndex: 10
+      }}>
+        <div style={{ display: 'flex', gap: 'var(--sp-2)' }}>
+          {user.role === 'admin' && (
+            <>
+              <button
+                onClick={() => setView('council')}
+                style={{
+                  background: view === 'council' ? 'var(--accent)' : 'transparent',
+                  color: view === 'council' ? 'var(--bg-void)' : 'var(--text-muted)',
+                  border: '1px solid var(--border-soft)',
+                  padding: '4px 12px',
+                  borderRadius: 'var(--r-md)',
+                  fontSize: '10px',
+                  fontFamily: 'var(--font-mono)',
+                  cursor: 'pointer'
+                }}
+              >
+                COUNCIL INTERFACE
+              </button>
+              <button
+                onClick={() => setView('admin')}
+                style={{
+                  background: view === 'admin' ? 'var(--warning)' : 'transparent',
+                  color: view === 'admin' ? 'var(--bg-void)' : 'var(--text-muted)',
+                  border: '1px solid var(--border-soft)',
+                  padding: '4px 12px',
+                  borderRadius: 'var(--r-md)',
+                  fontSize: '10px',
+                  fontFamily: 'var(--font-mono)',
+                  cursor: 'pointer'
+                }}
+              >
+                ADMIN DASHBOARD
+              </button>
+            </>
+          )}
         </div>
-      )}
+
+        {/* History toggle */}
+        <button
+          onClick={() => setHistoryOpen(!historyOpen)}
+          style={{
+            display: "flex", alignItems: "center", gap: 6,
+            background: historyOpen ? "var(--accent-dim)" : "transparent",
+            border: `1px solid ${historyOpen ? "var(--accent-glow)" : "var(--border-soft)"}`,
+            padding: "4px 14px",
+            borderRadius: "var(--r-md)",
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+            color: historyOpen ? "var(--accent)" : "var(--text-muted)",
+            cursor: "pointer",
+            letterSpacing: 1,
+            transition: "all 0.2s",
+          }}
+        >
+          📋 HISTORY
+        </button>
+      </div>
+
+      {/* Chat History Sidebar */}
+      <ChatHistory
+        isOpen={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onLoadSession={handleLoadSession}
+        activeSessionId={sessionId}
+      />
 
       {view === 'admin' && user.role === 'admin' ? (
         <main style={{ flex: 1, zIndex: 1, maxWidth: 1200, margin: '0 auto', width: '100%' }}>
@@ -210,7 +258,8 @@ export default function App() {
                       "🛡️ Injection Guard",
                       "🔀 Crypto Shuffle",
                       "🚫 Identity Redaction",
-                      " Gemini · Groq · OpenRouter · DeepSeek ",
+                      "📊 Multi-Dimensional Scoring",
+                      " Gemini · Groq · OpenRouter ",
                     ].map((badge) => (
                       <span
                         key={badge}
@@ -230,14 +279,20 @@ export default function App() {
                     ))}
                   </div>
 
-                  <PromptInput onSubmit={runSession} disabled={isActive} warnings={promptWarnings} />
+                  <PromptInput
+                    onSubmit={runSession}
+                    disabled={isActive}
+                    warnings={promptWarnings}
+                    attachments={attachments}
+                    onAttachmentsChange={setAttachments}
+                  />
                 </div>
               </>
             )}
 
             {isActive && <ActivityLog entries={activityLog} />}
 
-            {(showOutputsTab || showVerdictTab) && (
+            {(showOutputsTab || showVerdictTab || showDiffTab) && (
               <div
                 style={{
                   display: "flex",
@@ -250,6 +305,7 @@ export default function App() {
                 {TABS.map((tab) => {
                   if (tab.id === "outputs" && !showOutputsTab) return null;
                   if (tab.id === "verdict" && !showVerdictTab) return null;
+                  if (tab.id === "diff" && !showDiffTab) return null;
                   const isActiveTab = activeTab === tab.id;
                   return (
                     <button
@@ -305,7 +361,14 @@ export default function App() {
             )}
 
             {activeTab === "verdict" && showVerdictTab && (
-              <VerdictScreen verdictBreakdown={verdictBreakdown} />
+              <VerdictScreen verdictBreakdown={verdictBreakdown} combinedOutput={combinedOutput} />
+            )}
+
+            {activeTab === "diff" && showDiffTab && (
+              <OutputDiffView
+                anonymizedOutputs={anonymizedOutputs}
+                revealMap={verdictBreakdown?.revealMap}
+              />
             )}
           </main>
         </>
