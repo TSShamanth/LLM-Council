@@ -57,7 +57,7 @@ export function useCouncilSession() {
     setState((s) => ({ ...s, error: err, phase: PHASES.IDLE }));
   }, []);
 
-  const runSession = useCallback(async (rawPrompt) => {
+  const runSession = useCallback(async (rawPrompt, purpose = 'content') => {
     revealMapRef.current = null;
 
     const enabledIds = await getEnabledProviders();
@@ -171,6 +171,29 @@ export function useCouncilSession() {
 
     log(`🏆 Verdict: ${judgeResult.winner} wins`, "success");
     log(`🎭 Identity revealed: ${winnerProvider?.icon} ${winnerProvider?.name}`, "success");
+
+    // ── Record deliberation for Admin Stats ─────────────────────────────
+    try {
+      const recordRes = await fetch('/api/deliberations/record', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({
+          purpose,
+          winnerId: winnerProviderId,
+          providers: enabledIds
+        })
+      });
+      if (recordRes.ok) {
+        console.log(`✅ Deliberation recorded successfully for purpose: ${purpose}`);
+      } else {
+        console.warn('⚠️ Server rejected deliberation record');
+      }
+    } catch (err) {
+      console.warn('Failed to record deliberation statistics:', err);
+    }
 
     setState((s) => ({
       ...s,

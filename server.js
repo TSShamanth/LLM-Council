@@ -7,6 +7,8 @@
 
 import 'dotenv/config';
 import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
@@ -14,6 +16,8 @@ import { body, validationResult } from 'express-validator';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import db from './database.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Import providers (using correct paths)
 import { callGemini } from './src/api/providers/gemini.js';
@@ -54,6 +58,14 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+const isAdmin = (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
+    next();
+  } else {
+    res.status(403).json({ error: 'Admin access required.' });
+  }
+};
+
 // ── ENV VALIDATION ─────────────────────────────────────────────────
 const REQUIRED_ENV = ['GOOGLE_AI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY'];
 const missingKeys = REQUIRED_ENV.filter(key => !process.env[key]);
@@ -68,7 +80,29 @@ if (missingKeys.length === REQUIRED_ENV.length) {
 // ── LOGGING ────────────────────────────────────────────────────────
 function log(level, message, meta = {}) {
   const timestamp = new Date().toISOString();
-  console.log(JSON.stringify({ timestamp, level, message, ...meta }));
+  const logEntry = { timestamp, level, message, ...meta };
+  console.log(JSON.stringify(logEntry));
+
+  // Also log errors to DB
+  if (level === 'error') {
+    try {
+      db.prepare('INSERT INTO system_logs (level, message, meta) VALUES (?, ?, ?)')
+        .run(level, message, JSON.stringify(meta));
+    } catch (err) {
+      console.error('Failed to log to DB:', err.message);
+    }
+  }
+}
+
+function recordMetric({ providerId, latencyMs, tokensUsed, status, errorMessage = null }) {
+  try {
+    db.prepare(`
+      INSERT INTO performance_metrics (provider_id, latency_ms, tokens_used, status, error_message)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(providerId, latencyMs, tokensUsed, status, errorMessage);
+  } catch (err) {
+    console.error('Failed to record metric:', err.message);
+  }
 }
 
 // ── VALIDATION MIDDLEWARE ──────────────────────────────────────────
@@ -104,11 +138,14 @@ app.post('/api/auth/register', [
     const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
     if (existingUser) return res.status(400).json({ error: 'Email already registered' });
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const result = db.prepare('INSERT INTO users (email, password) VALUES (?, ?)').run(email, hashedPassword);
+    const userCount = db.prepare('SELECT count(*) as count FROM users').get().count;
+    const role = userCount === 0 ? 'admin' : 'user';
 
-    const token = jwt.sign({ id: result.lastInsertRowid, email }, JWT_SECRET, { expiresIn: '24h' });
-    res.status(201).json({ token, user: { id: result.lastInsertRowid, email } });
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = db.prepare('INSERT INTO users (email, password, role) VALUES (?, ?, ?)').run(email, hashedPassword, role);
+
+    const token = jwt.sign({ id: result.lastInsertRowid, email, role }, JWT_SECRET, { expiresIn: '24h' });
+    res.status(201).json({ token, user: { id: result.lastInsertRowid, email, role } });
   } catch (err) {
     log('error', 'Registration error', { error: err.message });
     res.status(500).json({ error: 'Failed to register user' });
@@ -128,8 +165,8 @@ app.post('/api/auth/login', [
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) return res.status(401).json({ error: 'Invalid email or password' });
 
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, user: { id: user.id, email: user.email } });
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ token, user: { id: user.id, email: user.email, role: user.role } });
   } catch (err) {
     log('error', 'Login error', { error: err.message });
     res.status(500).json({ error: 'Login failed' });
@@ -138,6 +175,86 @@ app.post('/api/auth/login', [
 
 app.get('/api/auth/me', authenticateToken, (req, res) => {
   res.json({ user: req.user });
+});
+
+app.get('/api/admin/stats', authenticateToken, isAdmin, (req, res) => {
+  try {
+    const totalSessions = db.prepare('SELECT count(*) as count FROM deliberations').get().count;
+    
+    const acceptanceRates = db.prepare(`
+      SELECT winner_id, count(*) as wins, 
+      (count(*) * 100.0 / (SELECT count(*) FROM deliberations)) as rate
+      FROM deliberations 
+      GROUP BY winner_id
+    `).all();
+
+    const performanceByPurpose = db.prepare(`
+      SELECT prompt_purpose, winner_id, count(*) as count
+      FROM deliberations
+      GROUP BY prompt_purpose, winner_id
+    `).all();
+
+    const providerMetrics = db.prepare(`
+      SELECT provider_id, 
+      AVG(latency_ms) as avgLatency, 
+      AVG(tokens_used) as avgTokens,
+      COUNT(CASE WHEN status = 'failure' THEN 1 END) as failureCount,
+      COUNT(*) as totalCalls
+      FROM performance_metrics
+      GROUP BY provider_id
+    `).all();
+
+    const topUsers = db.prepare(`
+      SELECT u.email, COUNT(d.id) as sessions
+      FROM users u
+      JOIN deliberations d ON u.id = d.user_id
+      GROUP BY u.id
+      ORDER BY sessions DESC
+      LIMIT 5
+    `).all();
+
+    const recentFailures = db.prepare(`
+      SELECT provider_id, error_message, created_at
+      FROM performance_metrics
+      WHERE status = 'failure'
+      ORDER BY created_at DESC
+      LIMIT 10
+    `).all();
+
+    res.json({
+      totalSessions,
+      acceptanceRates,
+      performanceByPurpose,
+      providerMetrics,
+      topUsers,
+      recentFailures
+    });
+  } catch (err) {
+    log('error', 'Admin stats error', { error: err.message });
+    res.status(500).json({ error: 'Failed to fetch statistics' });
+  }
+});
+
+app.post('/api/deliberations/record', authenticateToken, [
+  body('purpose').isIn(['code', 'content', 'logical']).withMessage('Invalid purpose'),
+  body('winnerId').isString().notEmpty(),
+  body('providers').isArray(),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
+  const { purpose, winnerId, providers } = req.body;
+  try {
+    db.prepare(`
+      INSERT INTO deliberations (user_id, prompt_purpose, winner_id, all_providers)
+      VALUES (?, ?, ?, ?)
+    `).run(req.user.id, purpose, winnerId, JSON.stringify(providers));
+    log('info', 'Deliberation recorded', { user: req.user.email, purpose, winner: winnerId });
+    res.status(201).json({ status: 'recorded' });
+  } catch (err) {
+    log('error', 'Record deliberation error', { error: err.message });
+    res.status(500).json({ error: 'Failed to record deliberation' });
+  }
 });
 
 app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) => {
@@ -150,6 +267,7 @@ app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) 
   
   const sanitized = sanitizeInput(prompt);
   if (!sanitized.safe) {
+    console.warn(`[SECURITY] Sanitizer blocked input. Reason: ${sanitized.reason}`);
     return res.status(400).json({ error: `Unsafe input detected: ${sanitized.reason}` });
   }
 
@@ -157,39 +275,56 @@ app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) 
   log('info', 'Generation started', { providers, promptLength: prompt.length });
 
   try {
+    const wrappedCall = async (providerId, fn) => {
+      const callStart = Date.now();
+      try {
+        const result = await fn();
+        recordMetric({
+          providerId,
+          latencyMs: Date.now() - callStart,
+          tokensUsed: result.tokensUsed || 0,
+          status: 'success'
+        });
+        return result;
+      } catch (err) {
+        recordMetric({
+          providerId,
+          latencyMs: Date.now() - callStart,
+          tokensUsed: 0,
+          status: 'failure',
+          errorMessage: err.message
+        });
+        return { error: err.message, providerId };
+      }
+    };
+
     const calls = [];
     if (providers.includes('gemini') && process.env.GOOGLE_AI_API_KEY) {
-      calls.push(
-        callGemini({
-          system: 'You are a helpful assistant.',
-          user: sanitized.cleaned,
-          temperature,
-          maxTokens: 2000,
-          providerId: 'gemini',
-        }).catch(err => ({ error: err.message, providerId: 'gemini' }))
-      );
+      calls.push(wrappedCall('gemini', () => callGemini({
+        system: 'You are a helpful assistant.',
+        user: sanitized.cleaned,
+        temperature,
+        maxTokens: 2000,
+        providerId: 'gemini',
+      })));
     }
     if (providers.includes('groq') && process.env.GROQ_API_KEY) {
-      calls.push(
-        callGroq({
-          system: 'You are a helpful assistant.',
-          user: sanitized.cleaned,
-          temperature,
-          maxTokens: 2000,
-          providerId: 'groq',
-        }).catch(err => ({ error: err.message, providerId: 'groq' }))
-      );
+      calls.push(wrappedCall('groq', () => callGroq({
+        system: 'You are a helpful assistant.',
+        user: sanitized.cleaned,
+        temperature,
+        maxTokens: 2000,
+        providerId: 'groq',
+      })));
     }
     if (providers.includes('openrouter') && process.env.OPENROUTER_API_KEY) {
-      calls.push(
-        callOpenRouter({
-          system: 'You are a helpful assistant.',
-          user: sanitized.cleaned,
-          temperature,
-          maxTokens: 1200,
-          providerId: 'openrouter',
-        }).catch(err => ({ error: err.message, providerId: 'openrouter' }))
-      );
+      calls.push(wrappedCall('openrouter', () => callOpenRouter({
+        system: 'You are a helpful assistant.',
+        user: sanitized.cleaned,
+        temperature,
+        maxTokens: 1200,
+        providerId: 'openrouter',
+      })));
     }
 
     const results = await Promise.all(calls);
@@ -231,6 +366,20 @@ app.get('/api/health', (req, res) => {
     }
   });
 });
+
+// ── PRODUCTION STATIC SERVING ──────────────────────────────────────
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+if (IS_PROD) {
+  const distPath = path.resolve(__dirname, 'dist');
+  app.use(express.static(distPath));
+
+  // Catch-all route to serve the React index.html for any frontend route
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });

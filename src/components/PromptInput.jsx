@@ -14,6 +14,7 @@ const EXAMPLE_PROMPTS = [
 
 export default function PromptInput({ onSubmit, disabled, warnings }) {
   const [value, setValue] = useState("");
+  const [purpose, setPurpose] = useState("content");
   const maxLen = 4000;
   const remaining = maxLen - value.length;
   const isReady = value.trim().length >= 10 && !disabled;
@@ -21,12 +22,36 @@ export default function PromptInput({ onSubmit, disabled, warnings }) {
   function handleKeyDown(e) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && isReady) {
       e.preventDefault();
-      onSubmit(value);
+      onSubmit(value, purpose);
     }
   }
 
   return (
     <div style={{ animation: "slide-up 0.4s ease" }}>
+      {/* Purpose Selector */}
+      <div style={{ display: "flex", gap: "var(--sp-2)", marginBottom: "var(--sp-4)" }}>
+        {['code', 'content', 'logical'].map((p) => (
+          <button
+            key={p}
+            onClick={() => setPurpose(p)}
+            disabled={disabled}
+            style={{
+              padding: "6px 14px",
+              background: purpose === p ? "var(--accent)" : "var(--bg-raised)",
+              border: `1px solid ${purpose === p ? "var(--accent)" : "var(--border-dim)"}`,
+              borderRadius: "var(--r-md)",
+              color: purpose === p ? "var(--bg-void)" : "var(--text-muted)",
+              fontFamily: "var(--font-mono)", fontSize: 10,
+              cursor: "pointer", letterSpacing: 1, textTransform: "uppercase",
+              transition: "all 0.2s",
+              fontWeight: purpose === p ? 700 : 400,
+            }}
+          >
+            {p}
+          </button>
+        ))}
+      </div>
+
       {/* Main prompt box */}
       <div style={{
         background: "var(--bg-surface)",
@@ -43,7 +68,7 @@ export default function PromptInput({ onSubmit, disabled, warnings }) {
           background: "var(--bg-raised)",
         }}>
           <span className="mono" style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: 2 }}>
-            COUNCIL PROMPT
+            COUNCIL PROMPT ({purpose.toUpperCase()})
           </span>
           <span className="mono" style={{
             fontSize: 10,
@@ -82,7 +107,7 @@ export default function PromptInput({ onSubmit, disabled, warnings }) {
           </span>
           <button
             disabled={!isReady}
-            onClick={() => onSubmit(value)}
+            onClick={() => onSubmit(value, purpose)}
             style={{
               padding: "8px 20px",
               background: isReady ? "var(--accent)" : "var(--bg-overlay)",

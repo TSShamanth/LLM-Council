@@ -29,7 +29,6 @@ const INJECTION_PATTERNS = [
   /disregard (all )?(previous|above)/i,
   /<script[^>]*>.*?<\/script>/gi,
   /javascript:/gi,
-  /on(load|error|click|mouseover)\s*=/gi,
   /<iframe/gi,
 ];
 
@@ -38,7 +37,6 @@ const XSS_PATTERNS = [
   /<script[^>]*>.*?<\/script>/gi,
   /<iframe/gi,
   /javascript:/gi,
-  /on\w+\s*=\s*["'][^"']*["']/gi, // onclick="...", onload="...", etc.
   /<embed/gi,
   /<object/gi,
 ];
