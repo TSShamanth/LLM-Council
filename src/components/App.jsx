@@ -7,12 +7,14 @@
 import { useState, useEffect } from "react";
 import "../styles/globals.css";
 import { useCouncilSession, PHASES } from "../hooks/useCouncilSession.js";
+import { useAuth } from "../hooks/useAuth.jsx";
 import CouncilHeader from "./CouncilHeader.jsx";
 import ProviderStatus from "./ProviderStatus.jsx";
 import PromptInput from "./PromptInput.jsx";
 import OutputCard from "./OutputCard.jsx";
 import VerdictScreen from "./VerdictScreen.jsx";
 import ActivityLog from "./ActivityLog.jsx";
+import AuthForm from "./AuthForm.jsx";
 
 const TABS = [
   { id: "outputs", label: "SUBMISSIONS", icon: "◧" },
@@ -21,6 +23,7 @@ const TABS = [
 
 export default function App() {
   const { state, runSession, reset } = useCouncilSession();
+  const { user, loading } = useAuth();
   const [activeTab, setActiveTab] = useState("outputs");
 
   const {
@@ -41,6 +44,30 @@ export default function App() {
     if (phase === PHASES.JUDGING) setActiveTab("verdict");
     if (phase === PHASES.RESULTS) setActiveTab("verdict");
   }, [phase]);
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", background: "var(--bg-void)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div className="mono" style={{ color: "var(--accent)" }}>INITIALIZING ENCRYPTED SESSION...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div style={{ minHeight: "100vh", background: "var(--bg-void)", position: "relative" }}>
+        <div className="grid-bg" />
+        <div style={{ padding: "var(--sp-8)", position: "relative", zIndex: 1 }}>
+          <div style={{ textAlign: "center", marginBottom: "var(--sp-8)" }}>
+            <div className="display" style={{ fontSize: 42, color: "var(--text-primary)", lineHeight: 1, letterSpacing: 4 }}>
+              COUNCIL OF LLMs
+            </div>
+          </div>
+          <AuthForm />
+        </div>
+      </div>
+    );
+  }
 
   const isIdle = phase === PHASES.IDLE;
   const isActive = !isIdle;

@@ -3,6 +3,7 @@
  * Top navigation bar — shows phase, token usage, and session controls.
  */
 import { PHASES } from "../hooks/useCouncilSession.js";
+import { useAuth } from "../hooks/useAuth.jsx";
 
 const PHASE_LABELS = {
   [PHASES.IDLE]:       { label: "STANDBY",    color: "var(--text-muted)" },
@@ -12,6 +13,7 @@ const PHASE_LABELS = {
 };
 
 export default function CouncilHeader({ phase, totalTokensUsed, onReset }) {
+  const { user, logout } = useAuth();
   const phaseInfo = PHASE_LABELS[phase] ?? PHASE_LABELS[PHASES.IDLE];
   const isActive = phase !== PHASES.IDLE && phase !== PHASES.RESULTS;
 
@@ -66,8 +68,30 @@ export default function CouncilHeader({ phase, totalTokensUsed, onReset }) {
         </span>
       </div>
 
-      {/* Right: Tokens + Reset */}
+      {/* Right: Tokens + User + Reset */}
       <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-4)" }}>
+        {user && (
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-3)", marginRight: "var(--sp-2)" }}>
+            <span className="mono" style={{ fontSize: 9, color: "var(--text-muted)", borderRight: "1px solid var(--border-dim)", paddingRight: 12 }}>
+              {user.email}
+            </span>
+            <button
+              onClick={logout}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "var(--text-muted)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 9,
+                cursor: "pointer",
+                padding: 0,
+                textDecoration: "underline"
+              }}
+            >
+              LOGOUT
+            </button>
+          </div>
+        )}
         {totalTokensUsed > 0 && (
           <span className="mono" style={{ fontSize: 10, color: "var(--text-muted)" }}>
             ~{totalTokensUsed.toLocaleString()} tokens

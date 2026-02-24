@@ -11,6 +11,9 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { body, validationResult } from 'express-validator';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import db from './database.js';
 
 // Import providers (using correct paths)
 import { callGemini } from './src/api/providers/gemini.js';
@@ -34,6 +37,22 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 app.use('/api', limiter);
+
+const JWT_SECRET = process.env.JWT_SECRET || 'your-fallback-secret-key-change-this';
+
+// ── AUTH MIDDLEWARE ────────────────────────────────────────────────
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) return res.status(401).json({ error: 'Access denied. No token provided.' });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: 'Invalid or expired token.' });
+    req.user = user;
+    next();
+  });
+};
 
 // ── ENV VALIDATION ─────────────────────────────────────────────────
 const REQUIRED_ENV = ['GOOGLE_AI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY'];
@@ -72,7 +91,56 @@ const validateGenerate = [
 
 // ── ROUTES ─────────────────────────────────────────────────────────
 
-app.post('/api/generate', validateGenerate, async (req, res) => {
+app.post('/api/auth/register', [
+  body('email').isEmail().withMessage('Invalid email format').normalizeEmail(),
+  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
+  const { email, password } = req.body;
+
+  try {
+    const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+    if (existingUser) return res.status(400).json({ error: 'Email already registered' });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = db.prepare('INSERT INTO users (email, password) VALUES (?, ?)').run(email, hashedPassword);
+
+    const token = jwt.sign({ id: result.lastInsertRowid, email }, JWT_SECRET, { expiresIn: '24h' });
+    res.status(201).json({ token, user: { id: result.lastInsertRowid, email } });
+  } catch (err) {
+    log('error', 'Registration error', { error: err.message });
+    res.status(500).json({ error: 'Failed to register user' });
+  }
+});
+
+app.post('/api/auth/login', [
+  body('email').isEmail().withMessage('Invalid email format').normalizeEmail(),
+  body('password').exists().withMessage('Password is required'),
+], async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const isValid = await bcrypt.compare(password, user.password);
+    if (!isValid) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ token, user: { id: user.id, email: user.email } });
+  } catch (err) {
+    log('error', 'Login error', { error: err.message });
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.get('/api/auth/me', authenticateToken, (req, res) => {
+  res.json({ user: req.user });
+});
+
+app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({ error: errors.array()[0].msg });

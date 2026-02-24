@@ -1,4 +1,8 @@
-# Logs
+# Node.js
+node_modules/
+dist/
+dist-ssr/
+*.local
 logs
 *.log
 npm-debug.log*
@@ -7,13 +11,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Dependency directories
-node_modules/
-dist/
-dist-ssr/
-*.local
-
-# Editor directories and files
+# Editor
 .vscode/*
 !.vscode/extensions.json
 .idea/
@@ -24,12 +22,16 @@ dist-ssr/
 *.sln
 *.sw?
 
-# Environment variables (CRITICAL: Never remove these)
+# Environment variables (CRITICAL)
 .env
 .env.example
 .env.production
 .env.local
 .env.*.local
+
+# Database
+council.db
+council.db-journal
 
 # Tool specific
 .gemini/
