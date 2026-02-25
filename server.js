@@ -46,15 +46,85 @@ app.use(express.json({ limit: '10mb' }));
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30, // Increased slightly for new endpoints
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60_000,
+  max: parseInt(process.env.RATE_LIMIT_MAX) || 30,
   message: { error: 'Too many requests. Please wait 1 minute.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
 app.use('/api', limiter);
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-fallback-secret-key-change-this';
+// ── JWT SECRET (MANDATORY) ────────────────────────────────────────
+// §3.1 #1 / §3.2: Never use a hardcoded fallback. Auto-generate if missing.
+if (!process.env.JWT_SECRET) {
+  const generated = crypto.randomBytes(64).toString('hex');
+  const envPath = path.resolve(__dirname, '.env');
+  try {
+    fs.appendFileSync(envPath, `\nJWT_SECRET=${generated}\n`);
+    console.warn('⚠️  JWT_SECRET was missing — generated and saved to .env');
+  } catch {
+    console.warn('⚠️  JWT_SECRET was missing — generated for this session (could not write to .env)');
+  }
+  process.env.JWT_SECRET = generated;
+}
+const JWT_SECRET = process.env.JWT_SECRET;
+
+// ── ACCOUNT LOCKOUT (§3.3 #5) ─────────────────────────────────────
+// In-memory tracker: 5 failed attempts = 15 minute lockout
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
+const loginAttempts = new Map(); // email → { count, lockedUntil }
+
+function checkLoginLockout(email) {
+  const record = loginAttempts.get(email);
+  if (!record) return { locked: false };
+  if (record.lockedUntil && Date.now() < record.lockedUntil) {
+    const remainingMs = record.lockedUntil - Date.now();
+    return { locked: true, remainingMs };
+  }
+  if (record.lockedUntil && Date.now() >= record.lockedUntil) {
+    loginAttempts.delete(email); // Reset after lockout expires
+    return { locked: false };
+  }
+  return { locked: false };
+}
+
+function recordFailedLogin(email) {
+  const record = loginAttempts.get(email) || { count: 0, lockedUntil: null };
+  record.count++;
+  if (record.count >= LOGIN_MAX_ATTEMPTS) {
+    record.lockedUntil = Date.now() + LOGIN_LOCKOUT_MS;
+    log('warn', 'Account locked due to failed login attempts', { email, lockoutMinutes: 15 });
+  }
+  loginAttempts.set(email, record);
+}
+
+function clearLoginAttempts(email) {
+  loginAttempts.delete(email);
+}
+
+// ── PASSWORD POLICY (§3.3 #6) ─────────────────────────────────────
+function validatePasswordStrength(password) {
+  if (!password || password.length < 8) {
+    return 'Password must be at least 8 characters';
+  }
+  if (!/[a-z]/.test(password)) {
+    return 'Password must contain at least one lowercase letter';
+  }
+  if (!/[A-Z]/.test(password)) {
+    return 'Password must contain at least one uppercase letter';
+  }
+  if (!/[0-9]/.test(password)) {
+    return 'Password must contain at least one number';
+  }
+  return null; // Valid
+}
+
+// ── API KEY LOG SANITIZATION (§3.3 #8) ────────────────────────────
+function maskSecret(value) {
+  if (!value || typeof value !== 'string' || value.length < 8) return '***';
+  return value.substring(0, 4) + '...' + value.substring(value.length - 3);
+}
 
 // ── UPLOADS DIRECTORY ─────────────────────────────────────────────
 const UPLOADS_DIR = path.resolve(__dirname, 'uploads');
@@ -95,27 +165,75 @@ const isAdmin = (req, res, next) => {
   }
 };
 
-// ── ENV VALIDATION ─────────────────────────────────────────────────
-const REQUIRED_ENV = ['GOOGLE_AI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY'];
-const missingKeys = REQUIRED_ENV.filter(key => !process.env[key]);
+// ── ENV VALIDATION (Phase 1: comprehensive startup check) ─────────
+const ALL_PROVIDER_KEYS = [
+  { key: 'GOOGLE_AI_API_KEY', name: 'Gemini' },
+  { key: 'GROQ_API_KEY', name: 'Groq' },
+  { key: 'OPENROUTER_API_KEY', name: 'OpenRouter' },
+  { key: 'ANTHROPIC_API_KEY', name: 'Anthropic' },
+  { key: 'OPENAI_API_KEY', name: 'OpenAI' },
+  { key: 'DEEPSEEK_API_KEY', name: 'DeepSeek' },
+  { key: 'AZURE_OPENAI_API_KEY', name: 'Azure OpenAI' },
+];
 
-if (missingKeys.length === REQUIRED_ENV.length) {
-  console.error(`❌ FATAL: Missing ALL API keys in .env file. At least one of ${REQUIRED_ENV.join(', ')} is required.`);
-} else if (missingKeys.length > 0) {
-  console.warn(`⚠️ Warning: Missing API keys: ${missingKeys.join(', ')}. Some providers will be disabled.`);
+const enabledProviders = ALL_PROVIDER_KEYS.filter(p => !!process.env[p.key]);
+const disabledProviders = ALL_PROVIDER_KEYS.filter(p => !process.env[p.key]);
+
+console.log('\n┌──────────────────────────────────────────────┐');
+console.log('│         COUNCIL OF LLMs — STARTUP            │');
+console.log('├──────────────────────────────────────────────┤');
+console.log(`│  JWT Secret:    ✅ Configured                 │`);
+console.log(`│  Node Env:      ${(process.env.NODE_ENV || 'development').padEnd(29)}│`);
+console.log(`│  Providers:     ${enabledProviders.length} enabled / ${disabledProviders.length} disabled${' '.repeat(Math.max(0, 13 - String(enabledProviders.length).length - String(disabledProviders.length).length))}│`);
+for (const p of enabledProviders) {
+  console.log(`│    ✅ ${p.name.padEnd(20)} ${maskSecret(process.env[p.key]).padEnd(16)}│`);
+}
+for (const p of disabledProviders) {
+  console.log(`│    ⬚  ${p.name.padEnd(20)} not configured   │`);
+}
+console.log('└──────────────────────────────────────────────┘\n');
+
+if (enabledProviders.length === 0) {
+  console.error('❌ FATAL: No API keys configured. At least one provider must be enabled.');
+  process.exit(1);
 }
 
-// ── LOGGING ────────────────────────────────────────────────────────
+// ── LOGGING (§3.3 #8: sanitize secrets from logs) ─────────────────
+const SENSITIVE_ENV_KEYS = [
+  'GOOGLE_AI_API_KEY', 'GROQ_API_KEY', 'OPENROUTER_API_KEY',
+  'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY',
+  'AZURE_OPENAI_API_KEY', 'JWT_SECRET',
+];
+
+function sanitizeLogMeta(meta) {
+  const sanitized = { ...meta };
+  // Remove stack traces in production
+  if (process.env.NODE_ENV === 'production') {
+    delete sanitized.stack;
+  }
+  // Mask any values that look like API keys
+  const json = JSON.stringify(sanitized);
+  let result = json;
+  for (const envKey of SENSITIVE_ENV_KEYS) {
+    const val = process.env[envKey];
+    if (val && val.length > 8) {
+      result = result.replaceAll(val, maskSecret(val));
+    }
+  }
+  return JSON.parse(result);
+}
+
 function log(level, message, meta = {}) {
   const timestamp = new Date().toISOString();
-  const logEntry = { timestamp, level, message, ...meta };
+  const safeMeta = sanitizeLogMeta(meta);
+  const logEntry = { timestamp, level, message, ...safeMeta };
   console.log(JSON.stringify(logEntry));
 
-  // Also log errors to DB
-  if (level === 'error') {
+  // Also log errors/warnings to DB
+  if (level === 'error' || level === 'warn') {
     try {
       db.prepare('INSERT INTO system_logs (level, message, meta) VALUES (?, ?, ?)')
-        .run(level, message, JSON.stringify(meta));
+        .run(level, message, JSON.stringify(safeMeta));
     } catch (err) {
       console.error('Failed to log to DB:', err.message);
     }
@@ -157,21 +275,37 @@ const validateGenerate = [
 
 app.post('/api/auth/register', [
   body('email').isEmail().withMessage('Invalid email format').normalizeEmail(),
-  body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  body('password').exists().withMessage('Password is required'),
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
 
   const { email, password } = req.body;
 
+  // §3.3 #6: Strong password policy
+  const pwError = validatePasswordStrength(password);
+  if (pwError) return res.status(400).json({ error: pwError });
+
   try {
     const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
     if (existingUser) return res.status(400).json({ error: 'Email already registered' });
 
-    const userCount = db.prepare('SELECT count(*) as count FROM users').get().count;
-    const role = userCount === 0 ? 'admin' : 'user';
+    // §3.1 #4: Admin role via ADMIN_EMAIL env or first-user fallback
+    let role = 'user';
+    const adminEmail = process.env.ADMIN_EMAIL;
+    if (adminEmail) {
+      // Explicit admin assignment via env var
+      role = email.toLowerCase() === adminEmail.toLowerCase() ? 'admin' : 'user';
+    } else {
+      // Legacy fallback: first registered user becomes admin
+      const userCount = db.prepare('SELECT count(*) as count FROM users').get().count;
+      if (userCount === 0) {
+        role = 'admin';
+        log('warn', 'First user auto-admin — set ADMIN_EMAIL env var for explicit control', { email });
+      }
+    }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12); // Increased from 10 to 12 rounds
     const result = db.prepare('INSERT INTO users (email, password, role) VALUES (?, ?, ?)').run(email, hashedPassword, role);
 
     const token = jwt.sign({ id: result.lastInsertRowid, email, role }, JWT_SECRET, { expiresIn: '24h' });
@@ -186,14 +320,33 @@ app.post('/api/auth/login', [
   body('email').isEmail().withMessage('Invalid email format').normalizeEmail(),
   body('password').exists().withMessage('Password is required'),
 ], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
   const { email, password } = req.body;
+
+  // §3.3 #5: Account lockout check
+  const lockout = checkLoginLockout(email);
+  if (lockout.locked) {
+    // Return same generic error to avoid revealing lockout status to attacker
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
 
   try {
     const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-    if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+    if (!user) {
+      recordFailedLogin(email);
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
 
     const isValid = await bcrypt.compare(password, user.password);
-    if (!isValid) return res.status(401).json({ error: 'Invalid email or password' });
+    if (!isValid) {
+      recordFailedLogin(email);
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Success — clear any lockout tracking
+    clearLoginAttempts(email);
 
     const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
     res.json({ token, user: { id: user.id, email: user.email, role: user.role } });
@@ -650,6 +803,7 @@ app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) 
     });
   } catch (err) {
     log('error', 'Generation error', { error: err.message, stack: err.stack });
+    // §3.1 #3: Never expose internal details to client
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -658,15 +812,36 @@ app.post('/api/generate', authenticateToken, validateGenerate, async (req, res) 
 // ── HEALTH & STATIC SERVING ───────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════
 
+const serverStartTime = Date.now();
+
 app.get('/api/health', (req, res) => {
+  // Phase 1: Enhanced health endpoint with DB, uptime, memory
+  let dbOk = false;
+  try {
+    db.prepare('SELECT 1').get();
+    dbOk = true;
+  } catch { /* DB unreachable */ }
+
+  const mem = process.memoryUsage();
+  const uptimeSec = Math.floor((Date.now() - serverStartTime) / 1000);
+
   res.json({
-    status: 'ok',
+    status: dbOk ? 'ok' : 'degraded',
     timestamp: new Date().toISOString(),
-    providers: {
-      gemini: !!process.env.GOOGLE_AI_API_KEY,
-      groq: !!process.env.GROQ_API_KEY,
-      openrouter: !!process.env.OPENROUTER_API_KEY,
-    }
+    uptime: {
+      seconds: uptimeSec,
+      human: `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m ${uptimeSec % 60}s`,
+    },
+    database: dbOk ? 'connected' : 'unreachable',
+    memory: {
+      heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+      heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
+      rssMB: Math.round(mem.rss / 1024 / 1024),
+    },
+    providers: Object.fromEntries(
+      ALL_PROVIDER_KEYS.map(p => [p.name.toLowerCase().replace(/\s+/g, '_'), !!process.env[p.key]])
+    ),
+    enabledCount: enabledProviders.length,
   });
 });
 
@@ -690,7 +865,12 @@ app.use((req, res) => {
 
 app.use((err, req, res, next) => {
   log('error', 'Unhandled error', { error: err.message, stack: err.stack });
-  res.status(500).json({ error: 'Internal server error' });
+  // §3.1 #3: Never expose stack traces or internal paths to clients
+  const isDev = process.env.NODE_ENV !== 'production';
+  res.status(500).json({
+    error: 'Internal server error',
+    ...(isDev && { detail: err.message }), // Only in development
+  });
 });
 
 const PORT = process.env.PORT || 3001;

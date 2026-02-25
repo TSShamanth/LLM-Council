@@ -109,7 +109,7 @@ IMPORTANT RULES:
 /**
  * Robustly parse JSON from LLM text, handling common formatting issues.
  */
-function robustParseJSON(text) {
+export function robustParseJSON(text) {
   if (!text) return null;
 
   // 1. Try direct parse
