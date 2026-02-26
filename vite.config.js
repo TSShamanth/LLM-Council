@@ -9,7 +9,7 @@ export default defineConfig({
       // Proxy all /api calls to the Express backend during development
       // This avoids CORS issues and keeps API keys server-side
       '/api': {
-        target: 'http://127.0.0.1:3001',
+        target: 'http://127.0.0.1:3002',
         changeOrigin: true,
         secure: false,
       },

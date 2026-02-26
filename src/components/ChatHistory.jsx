@@ -1,7 +1,7 @@
 /**
  * ChatHistory.jsx
  * Slide-out sidebar listing past council sessions.
- * Sessions are loaded from the backend API (SQLite-backed).
+ * Sessions are loaded from the backend API (MongoDB-backed).
  * Click to reload a session into the verdict view.
  */
 import { useState, useEffect, useCallback } from "react";

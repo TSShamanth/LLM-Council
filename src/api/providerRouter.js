@@ -6,7 +6,7 @@
  * All API calls MUST go through the backend at /api/generate to protect API keys.
  */
 
-const API_BASE = '/api'; // Proxied to localhost:3001 in dev (see vite.config.js)
+const API_BASE = '/api'; // Proxied to localhost:3002 in dev (see vite.config.js)
 
 /**
  * Call the backend /api/generate endpoint.
