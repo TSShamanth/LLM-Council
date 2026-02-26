@@ -48,7 +48,7 @@ export async function generateFromProviders({
       providers,
       temperature,
       images,          // Forward images to backend
-      system,          // Forward custom system prompt (judge uses this)
+      systemPrompt: system, // Forward custom system prompt (judge uses this)
       maxTokens,       // Forward custom max tokens (judge needs 5000+)
       skipSanitize,    // Skip sanitization for internal calls (judge/combo)
     }),

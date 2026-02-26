@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
@@ -61,6 +62,12 @@ public class GeminiProvider implements LLMProvider {
         Map<String, Object> body = Map.of(
                 "system_instruction", Map.of("parts", List.of(Map.of("text", system))),
                 "contents", List.of(Map.of("parts", List.of(Map.of("text", user)))),
+                "safetySettings", List.of(
+                    Map.of("category", "HARM_CATEGORY_HATE_SPEECH", "threshold", "BLOCK_NONE"),
+                    Map.of("category", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold", "BLOCK_NONE"),
+                    Map.of("category", "HARM_CATEGORY_HARASSMENT", "threshold", "BLOCK_NONE"),
+                    Map.of("category", "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold", "BLOCK_NONE")
+                ),
                 "generationConfig", Map.of(
                         "temperature", temperature,
                         "maxOutputTokens", maxTokens));
@@ -69,16 +76,40 @@ public class GeminiProvider implements LLMProvider {
                 .uri(url)
                 .bodyValue(body)
                 .retrieve()
+                .onStatus(status -> status.isError(), response -> 
+                    response.bodyToMono(String.class).flatMap(errorBody -> {
+                        log.error("Gemini API error: {}", errorBody);
+                        return Mono.error(new RuntimeException("Gemini API error: " + errorBody));
+                    })
+                )
                 .bodyToMono(Map.class)
                 .map(response -> {
                     long latency = System.currentTimeMillis() - start;
                     @SuppressWarnings("unchecked")
                     var candidates = (List<Map<String, Object>>) response.get("candidates");
+                    
                     if (candidates == null || candidates.isEmpty()) {
-                        throw new RuntimeException("No candidates in Gemini response");
+                        // Check if it was blocked by safety filters
+                        @SuppressWarnings("unchecked")
+                        var promptFeedback = (Map<String, Object>) response.get("promptFeedback");
+                        if (promptFeedback != null) {
+                             throw new RuntimeException("Gemini blocked response: " + promptFeedback.toString());
+                        }
+                        throw new RuntimeException("No candidates in Gemini response. Full body: " + response.toString());
                     }
+                    
+                    var candidate = candidates.get(0);
+                    var finishReason = candidate.get("finishReason");
+                    if ("SAFETY".equals(finishReason)) {
+                        throw new RuntimeException("Gemini response blocked by safety filters.");
+                    }
+
                     @SuppressWarnings("unchecked")
-                    var content = (Map<String, Object>) candidates.get(0).get("content");
+                    var content = (Map<String, Object>) candidate.get("content");
+                    if (content == null || content.get("parts") == null) {
+                         throw new RuntimeException("Malformed Gemini candidate: " + candidate.toString());
+                    }
+
                     @SuppressWarnings("unchecked")
                     var parts = (List<Map<String, Object>>) content.get("parts");
                     String text = (String) parts.get(0).get("text");

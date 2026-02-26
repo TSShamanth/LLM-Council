@@ -1,7 +1,6 @@
 package com.council.controller;
 
 import com.council.model.Deliberation;
-import com.council.model.Session;
 import com.council.model.SystemLog;
 import com.council.model.User;
 import com.council.repository.DeliberationRepository;
@@ -10,9 +9,6 @@ import com.council.repository.SystemLogRepository;
 import com.council.repository.UserRepository;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.aggregation.*;
-import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -34,18 +30,15 @@ public class AdminController {
     private final SessionRepository sessionRepository;
     private final DeliberationRepository deliberationRepository;
     private final SystemLogRepository systemLogRepository;
-    private final MongoTemplate mongoTemplate;
 
     public AdminController(UserRepository userRepository,
             SessionRepository sessionRepository,
             DeliberationRepository deliberationRepository,
-            SystemLogRepository systemLogRepository,
-            MongoTemplate mongoTemplate) {
+            SystemLogRepository systemLogRepository) {
         this.userRepository = userRepository;
         this.sessionRepository = sessionRepository;
         this.deliberationRepository = deliberationRepository;
         this.systemLogRepository = systemLogRepository;
-        this.mongoTemplate = mongoTemplate;
     }
 
     @GetMapping("/stats")
@@ -126,29 +119,58 @@ public class AdminController {
     }
 
     /**
-     * Provider metrics — basic stats per provider from deliberations.
-     * Full latency/token tracking would require a metrics collection.
+     * Provider metrics — calculates latency, tokens, and failures from system logs.
      */
     private List<Map<String, Object>> computeProviderMetrics() {
-        List<Deliberation> all = deliberationRepository.findAll();
+        // Fetch all logs once to avoid multiple DB hits
+        List<SystemLog> allLogs = systemLogRepository.findAll();
+        
+        // Get unique provider list from deliberations or logs
         Set<String> providers = new LinkedHashSet<>();
-        all.forEach(d -> {
-            if (d.getAllProviders() != null)
-                providers.addAll(d.getAllProviders());
+        deliberationRepository.findAll().forEach(d -> {
+            if (d.getAllProviders() != null) providers.addAll(d.getAllProviders());
+        });
+        allLogs.forEach(l -> {
+            if (l.getMeta() != null && l.getMeta().containsKey("provider")) {
+                providers.add(l.getMeta().get("provider").toString());
+            }
         });
 
-        long total = Math.max(1, all.size());
-        Map<String, Long> winCounts = all.stream()
+        List<Deliberation> deliberations = deliberationRepository.findAll();
+        Map<String, Long> winCounts = deliberations.stream()
                 .filter(d -> d.getWinnerId() != null)
                 .collect(Collectors.groupingBy(Deliberation::getWinnerId, Collectors.counting()));
 
         return providers.stream().map(pid -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("provider_id", pid);
-            m.put("avgLatency", 0); // Requires runtime metrics tracking
-            m.put("avgTokens", 0); // Requires runtime metrics tracking
-            m.put("failureCount", 0); // Could track from SystemLog
-            m.put("totalCalls", total);
+
+            // Filter logs for this provider
+            List<SystemLog> providerLogs = allLogs.stream()
+                .filter(l -> l.getMeta() != null && pid.equals(l.getMeta().get("provider")))
+                .toList();
+
+            long failures = providerLogs.stream().filter(l -> "error".equalsIgnoreCase(l.getLevel())).count();
+            
+            // Calculate averages from 'info' logs
+            List<SystemLog> successLogs = providerLogs.stream()
+                .filter(l -> "info".equalsIgnoreCase(l.getLevel()))
+                .toList();
+            
+            double avgLatency = successLogs.stream()
+                .filter(l -> l.getMeta().containsKey("latency"))
+                .mapToLong(l -> ((Number) l.getMeta().get("latency")).longValue())
+                .average().orElse(0.0);
+                
+            double avgTokens = successLogs.stream()
+                .filter(l -> l.getMeta().containsKey("tokens"))
+                .mapToLong(l -> ((Number) l.getMeta().get("tokens")).longValue())
+                .average().orElse(0.0);
+
+            m.put("avgLatency", avgLatency); 
+            m.put("avgTokens", avgTokens);
+            m.put("failureCount", failures);
+            m.put("totalCalls", providerLogs.size());
             m.put("wins", winCounts.getOrDefault(pid, 0L));
             return m;
         }).collect(Collectors.toList());

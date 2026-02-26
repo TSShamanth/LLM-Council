@@ -118,10 +118,21 @@ public class GenerateService {
                             "requestId", result.requestId(),
                             "tokensUsed", result.tokensUsed(),
                             "latencyMs", result.latencyMs()));
+                    
+                    // PERSIST SUCCESS LOG FOR METRICS
+                    logRepository.save(new SystemLog("info", 
+                        "Provider " + providerId + " success", 
+                        Map.of("provider", providerId, "latency", result.latencyMs(), "tokens", result.tokensUsed())));
                 } else {
+                    String errorMsg = "Provider returned no result or timed out";
                     failures.add(Map.of(
                             "provider", providerId,
-                            "error", "Provider returned no result"));
+                            "error", errorMsg));
+                    
+                    // PERSIST ERROR LOG
+                    logRepository.save(new SystemLog("error", 
+                        "Provider " + providerId + " failed", 
+                        Map.of("provider", providerId, "error", errorMsg)));
                 }
             } catch (Exception ex) {
                 failures.add(Map.of(
