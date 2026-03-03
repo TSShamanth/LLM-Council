@@ -5,7 +5,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -69,7 +72,18 @@ public class GroqProvider implements LLMProvider {
                 .header("Content-Type", "application/json")
                 .bodyValue(body)
                 .retrieve()
+                .onStatus(status -> status.isError(), response -> 
+                    response.bodyToMono(String.class).flatMap(errorBody -> {
+                        log.error("Groq API error: {}", errorBody);
+                        return Mono.error(new RuntimeException("Groq API error: " + errorBody));
+                    })
+                )
                 .bodyToMono(Map.class)
+                .retryWhen(Retry.backoff(3, Duration.ofSeconds(5))
+                        .filter(throwable -> throwable.getMessage() != null && 
+                                throwable.getMessage().contains("429"))
+                        .doBeforeRetry(signal -> log.warn("Groq API rate limited (429). Retrying... (attempt {})", 
+                                signal.totalRetriesInARow() + 1)))
                 .map(response -> {
                     long latency = System.currentTimeMillis() - start;
                     @SuppressWarnings("unchecked")

@@ -18,9 +18,23 @@ const EXAMPLE_PROMPTS = [
   "Write a binary search tree with insert, delete, and search",
 ];
 
-const ACCEPTED_EXTENSIONS = ".txt,.md,.json,.js,.ts,.jsx,.tsx,.py,.css,.html,.csv,.jpg,.jpeg,.png,.gif,.webp,.svg,.pdf";
+const ACCEPTED_EXTENSIONS = ".txt,.md,.json,.js,.ts,.jsx,.tsx,.py,.css,.html,.csv,.jpg,.jpeg,.png,.gif,.webp,.svg,.pdf,.zip";
 const MAX_FILE_SIZE_MB = 10;
 const MAX_FILES = 5;
+
+/**
+ * Read a file as text.
+ * @param {File} file
+ * @returns {Promise<string>}
+ */
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Failed to read file as text"));
+    reader.readAsText(file);
+  });
+}
 
 /**
  * Read a file as base64 data URL. Reusable utility.
@@ -140,7 +154,7 @@ export default function PromptInput({ onSubmit, disabled, warnings, attachments 
   const [purpose, setPurpose] = useState("content");
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef(null);
-  const maxLen = 4000;
+  const maxLen = 50000;
   const remaining = maxLen - value.length;
   const isReady = value.trim().length >= 10 && !disabled && !uploading;
 
@@ -188,12 +202,29 @@ export default function PromptInput({ onSubmit, disabled, warnings, attachments 
             dataUrl,     // For preview
           });
         } else {
-          // Non-image files: upload to server for storage
+          // Non-image files: upload to server for storage AND read text content for prompt context
           const result = await uploadFileToServer(file, base64);
+          let textContent = result.textContent || null;
+          
+          if (!textContent) {
+            try {
+              // Only attempt to read if it's likely a text file
+              const textMimeTypes = ["text/", "application/json", "application/javascript", "application/x-javascript", "application/typescript", "application/xml"];
+              if (textMimeTypes.some(m => file.type.startsWith(m)) || 
+                  [".txt", ".md", ".json", ".js", ".ts", ".jsx", ".tsx", ".py", ".css", ".html", ".csv", ".yaml", ".yml"].some(ext => file.name.endsWith(ext))) {
+                textContent = await readFileAsText(file);
+              }
+
+            } catch (e) {
+              console.warn("Could not read file as text:", file.name);
+            }
+          }
+
           newAttachments.push({
             ...result,
             base64: null,
             dataUrl: null,
+            textContent, // Use server-extracted or client-read text
           });
         }
       }

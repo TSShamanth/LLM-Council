@@ -120,15 +120,29 @@ export function useCouncilSession() {
     const enabledProviders = PROVIDERS.filter((p) => enabledIds.includes(p.id));
     const currentAttachments = state.attachments;
 
-    // Prepare images for multimodal: extract base64 data from image attachments
+    // 1. Prepare images for multimodal: extract base64 data from image attachments
     const imageAttachments = currentAttachments
       .filter((a) => a.mimeType?.startsWith("image/") && a.base64)
       .map((a) => ({ base64: a.base64, mimeType: a.mimeType }));
 
+    // 2. Prepare text from other files (code, txt, md, etc.)
+    let contextFromFiles = "";
+    const textAttachments = currentAttachments.filter(a => !a.mimeType?.startsWith("image/"));
+    
+    for (const file of textAttachments) {
+      if (file.textContent) {
+        contextFromFiles += `\n\n--- FILE: ${file.originalName} ---\n${file.textContent}\n--- END FILE ---`;
+      }
+    }
+
+    const finalUserPrompt = contextFromFiles 
+      ? `${rawPrompt}\n\n[CONTEXT FROM ATTACHED FILES]:${contextFromFiles}`
+      : rawPrompt;
+
     setState({ ...INITIAL_STATE, phase: PHASES.GENERATING, attachments: currentAttachments });
 
     // ── Phase 0: Sanitize input ──────────────────────────────────────────
-    const { sanitized: sanitizedPrompt, warnings: promptWarnings } = sanitizePrompt(rawPrompt);
+    const { sanitized: sanitizedPrompt, warnings: promptWarnings } = sanitizePrompt(finalUserPrompt);
     setState((s) => ({ ...s, sanitizedPrompt, promptWarnings, prompt: rawPrompt }));
 
     if (promptWarnings.length > 0) {

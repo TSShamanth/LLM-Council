@@ -1,0 +1,109 @@
+New Task!!
+
+   Recently i have implemented the placements dashboard ..go thorugh the code for implementation!!
+
+   next i need to implement..the student side of placements functionality!! and below are the reuqired things!
+
+   Placement Registration
+
+   Register for placement drive
+
+   Upload:
+
+   Resume (PDF)
+
+   Photo
+
+   CGPA
+
+   Skills
+
+   Backlog count
+
+   Choose eligible departments
+
+   Job Listings Dashboard
+
+   Students can:
+
+   View all active companies
+
+   Filter by:
+
+   Salary package
+
+   Role
+
+   Location
+
+   Eligibility criteria
+
+   See:
+
+   Last date to apply
+
+   Drive date
+
+   Selection rounds
+
+   Apply for Company
+
+   One-click apply
+
+   Prevent duplicate application
+
+   Auto eligibility check:
+
+   CGPA >= required CGPA
+
+   No backlogs
+
+   If not eligible → show message.
+
+   Application Status Tracker
+
+   For each company:
+
+   Applied
+
+   Shortlisted
+
+   Aptitude Cleared
+
+   Interview Cleared
+
+   Selected
+
+   Rejected
+
+   🔥 This gives real-time updates using StreamBuilder.
+
+5️⃣ Resume Builder
+   Students can:
+
+   Auto-generate resume from profile data
+
+   Download as PDF
+
+   Placement History
+
+   Previously placed students list
+
+   Company name
+
+   Package
+
+   Role
+
+   Year
+
+   Good for analytics & credibility.
+
+
+   soo i need you to implement the whole functionality! frontend and backend! side by side
+
+   IMPORTANT
+   MAKE SURE U GO THORUGH THE EXSISTING IMPLEMENTATION
+   MAKE SURE U REUSE THE CODE
+   MAKE SURE U DONT SPOIL THE EXSISTING IMPLEMENTATION
+   MAKE SURE U IMPLEMENT THINGS STEP BY STEP

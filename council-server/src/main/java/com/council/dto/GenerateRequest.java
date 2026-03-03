@@ -11,7 +11,7 @@ import java.util.List;
 @Data
 public class GenerateRequest {
     @NotBlank(message = "Prompt is required")
-    @Size(min = 1, max = 15000, message = "Prompt must be 1-15000 characters")
+    @Size(min = 1, max = 50000, message = "Prompt must be 1-50000 characters")
     private String prompt;
 
     private List<String> providers; // Optional — defaults to all enabled

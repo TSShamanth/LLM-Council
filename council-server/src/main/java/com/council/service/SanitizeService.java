@@ -53,8 +53,7 @@ public class SanitizeService {
             return new SanitizeResult(false, "", "Input is empty");
         }
 
-        // Normalize whitespace
-        String cleaned = input.trim().replaceAll("\\s+", " ");
+        String cleaned = input.trim();
 
         // Check injection patterns
         for (Pattern p : INJECTION_PATTERNS) {

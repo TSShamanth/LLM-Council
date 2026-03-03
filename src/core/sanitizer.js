@@ -75,9 +75,9 @@ export function sanitizeInput(input) {
     return { safe: false, reason: 'Input must be a non-empty string' };
   }
 
-  // Length check (increased for Judge comparisons)
-  if (input.length > 15000) {
-    return { safe: false, reason: 'Input exceeds 15,000 character limit' };
+  // Length check (increased for large PDF context)
+  if (input.length > 50000) {
+    return { safe: false, reason: 'Input exceeds 50,000 character limit' };
   }
 
   // Check for prompt injection attempts
@@ -97,10 +97,7 @@ export function sanitizeInput(input) {
     .replace(/<embed[^>]*>/gi, '')
     .replace(/<object[^>]*>.*?<\/object>/gi, '');
 
-  // Normalize whitespace
-  cleaned = cleaned.trim().replace(/\s+/g, ' ');
-
-  return { safe: true, cleaned };
+  return { safe: true, cleaned: cleaned.trim() };
 }
 
 /**
