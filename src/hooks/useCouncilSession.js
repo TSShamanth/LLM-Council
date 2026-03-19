@@ -19,7 +19,7 @@ import { callProvider, getEnabledProviders } from "../api/providerRouter.js";
 import { sanitizeOutput, sanitizePrompt } from "../core/sanitizer.js";
 import { PROVIDERS, PROVIDER_MAP, GENERATION_SYSTEM_PROMPT } from "../core/councilConfig.js";
 import { anonymizeOutputs } from "../core/anonymizer.js";
-import { runJudge, generateCombinedOutput } from "../core/judge.js";
+import { runJudge, generateCombinedOutput, runCombineJudge, runComponentCombiner } from "../core/judge.js";
 
 export const PHASES = {
   IDLE: "idle",
@@ -107,8 +107,9 @@ export function useCouncilSession() {
    * Run a full council session.
    * @param {string} rawPrompt - User's raw prompt
    * @param {string} purpose - 'code' | 'content' | 'logical'
+   * @param {string} mode - 'compare' | 'combine'
    */
-  const runSession = useCallback(async (rawPrompt, purpose = 'content') => {
+  const runSession = useCallback(async (rawPrompt, purpose = 'content', mode = 'compare') => {
     revealMapRef.current = null;
 
     const enabledIds = await getEnabledProviders();
@@ -150,7 +151,7 @@ export function useCouncilSession() {
     }
 
     const imgMsg = imageAttachments.length > 0 ? ` with ${imageAttachments.length} image(s)` : "";
-    log(`🏛️ Council convening — sending prompt${imgMsg} to ${enabledProviders.length} providers...`, "info");
+    log(`🏛️ Council convening (${mode.toUpperCase()} mode) — sending prompt${imgMsg} to ${enabledProviders.length} providers...`, "info");
 
     // ── Phase 1: Generate outputs (sequential per provider for UI feedback) ──
     const outputs = [];
@@ -218,68 +219,92 @@ export function useCouncilSession() {
     }));
 
     // ── Phase 3: Judge (with detailed per-output metrics) ────────────────
-    log("⚖️ Judge evaluating all submissions with detailed analysis...");
+    log(`⚖️ Judge evaluating all submissions for ${mode} mode...`);
 
-    let judgeResult;
+    let verdictBreakdown = { mode, revealMap: revealMapRef.current };
+    let finalCombinedOutput = null;
+
     try {
-      judgeResult = await runJudge(sanitizedPrompt, anonymizedOutputsResult);
+      if (mode === 'combine') {
+        const combineJudgeResult = await runCombineJudge(sanitizedPrompt, anonymizedOutputsResult);
+        log(`🧩 Judge identified ${combineJudgeResult.components.length} components. Synthesizing...`, "success");
+
+        verdictBreakdown.combineJudge = combineJudgeResult;
+        verdictBreakdown.components = combineJudgeResult.components.map(c => ({
+          ...c,
+          providerId: revealMapRef.current.get(c.winner)
+        }));
+
+        setState((s) => ({
+          ...s,
+          verdictBreakdown,
+          totalTokensUsed: s.totalTokensUsed + (combineJudgeResult.tokensUsed ?? 0),
+          phase: PHASES.COMBINING
+        }));
+
+        const integrationResult = await runComponentCombiner(sanitizedPrompt, anonymizedOutputsResult, combineJudgeResult);
+        finalCombinedOutput = integrationResult.combinedOutput;
+        log("✅ Integrated solution synthesized successfully.", "success");
+
+        setState((s) => ({
+          ...s,
+          totalTokensUsed: s.totalTokensUsed + (integrationResult.tokensUsed ?? 0),
+        }));
+      } else {
+        // Standard 'compare' mode
+        const judgeResult = await runJudge(sanitizedPrompt, anonymizedOutputsResult);
+        const winnerProviderId = revealMapRef.current.get(judgeResult.winner);
+        const winnerProvider = PROVIDER_MAP[winnerProviderId];
+
+        verdictBreakdown = {
+          ...verdictBreakdown,
+          winner: {
+            label: judgeResult.winner,
+            providerId: winnerProviderId,
+          },
+          overallAnalysis: judgeResult.overallAnalysis,
+          scores: judgeResult.scores,
+          minorityOpinions: judgeResult.minorityOpinions.map((m) => ({
+            ...m,
+            providerId: revealMapRef.current.get(m.label),
+          })),
+        };
+
+        log(`🏆 Verdict: ${judgeResult.winner} wins`, "success");
+        log(`🎭 Identity revealed: ${winnerProvider?.icon} ${winnerProvider?.name}`, "success");
+
+        setState((s) => ({
+          ...s,
+          verdictBreakdown,
+          totalTokensUsed: s.totalTokensUsed + (judgeResult.tokensUsed ?? 0),
+          phase: PHASES.COMBINING
+        }));
+
+        // Optional best-of synthesis for compare mode
+        const combineResult = await generateCombinedOutput(
+          sanitizedPrompt,
+          anonymizedOutputsResult,
+          judgeResult.scores,
+          judgeResult.winner
+        );
+        finalCombinedOutput = combineResult.combinedOutput;
+        setState((s) => ({
+          ...s,
+          totalTokensUsed: s.totalTokensUsed + (combineResult.tokensUsed ?? 0),
+        }));
+      }
     } catch (err) {
-      setError(`Judge failed: ${err.message}`);
+      setError(`Evaluation failed: ${err.message}`);
       return;
-    }
-
-    const winnerProviderId = revealMapRef.current.get(judgeResult.winner);
-    const winnerProvider = PROVIDER_MAP[winnerProviderId];
-
-    const verdictBreakdown = {
-      winner: {
-        label: judgeResult.winner,
-        providerId: winnerProviderId,
-      },
-      overallAnalysis: judgeResult.overallAnalysis,
-      scores: judgeResult.scores,
-      minorityOpinions: judgeResult.minorityOpinions.map((m) => ({
-        ...m,
-        providerId: revealMapRef.current.get(m.label),
-      })),
-      revealMap: revealMapRef.current,
-    };
-
-    log(`🏆 Verdict: ${judgeResult.winner} wins`, "success");
-    log(`🎭 Identity revealed: ${winnerProvider?.icon} ${winnerProvider?.name}`, "success");
-
-    setState((s) => ({
-      ...s,
-      verdictBreakdown,
-      totalTokensUsed: s.totalTokensUsed + (judgeResult.tokensUsed ?? 0),
-    }));
-
-    // ── Phase 4: Generate combined output ────────────────────────────────
-    setState((s) => ({ ...s, phase: PHASES.COMBINING }));
-    log("🔗 Generating combined best-of output from all submissions...");
-
-    let combinedOutput = null;
-    try {
-      const combineResult = await generateCombinedOutput(
-        sanitizedPrompt,
-        anonymizedOutputsResult,
-        judgeResult.scores,
-        judgeResult.winner
-      );
-      combinedOutput = combineResult.combinedOutput;
-      log("✅ Combined output generated successfully.", "success");
-
-      setState((s) => ({
-        ...s,
-        totalTokensUsed: s.totalTokensUsed + (combineResult.tokensUsed ?? 0),
-      }));
-    } catch (err) {
-      log(`⚠️ Combined output generation failed: ${err.message}. Continuing without it.`, "warn");
     }
 
     // ── Record deliberation for Admin Stats ─────────────────────────────
     try {
-      const recordRes = await fetch('/api/deliberations/record', {
+      const winnerId = mode === 'combine' 
+        ? verdictBreakdown.components[0]?.providerId // Use first component winner for stats
+        : verdictBreakdown.winner?.providerId;
+
+      await fetch('/api/deliberations/record', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -287,13 +312,11 @@ export function useCouncilSession() {
         },
         body: JSON.stringify({
           purpose,
-          winnerId: winnerProviderId,
-          providers: enabledIds
+          winnerId,
+          providers: enabledIds,
+          mode
         })
       });
-      if (!recordRes.ok) {
-        console.warn('⚠️ Server rejected deliberation record');
-      }
     } catch (err) {
       console.warn('Failed to record deliberation statistics:', err);
     }
@@ -304,15 +327,16 @@ export function useCouncilSession() {
       purpose,
       verdictBreakdown,
       anonymizedOutputs: anonymizedOutputsResult,
-      combinedOutput,
+      combinedOutput: finalCombinedOutput,
       attachments: currentAttachments,
     });
 
     setState((s) => ({
       ...s,
       phase: PHASES.RESULTS,
-      combinedOutput,
+      combinedOutput: finalCombinedOutput,
       sessionId,
+      verdictBreakdown // Ensure final state has it
     }));
   }, [log, setError, state.attachments]);
 

@@ -152,6 +152,7 @@ function FileBadge({ file, onRemove }) {
 export default function PromptInput({ onSubmit, disabled, warnings, attachments = [], onAttachmentsChange }) {
   const [value, setValue] = useState("");
   const [purpose, setPurpose] = useState("content");
+  const [mode, setMode] = useState("compare"); // 'compare' or 'combine'
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef(null);
   const maxLen = 50000;
@@ -164,7 +165,7 @@ export default function PromptInput({ onSubmit, disabled, warnings, attachments 
   function handleKeyDown(e) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && isReady) {
       e.preventDefault();
-      onSubmit(value, purpose);
+      onSubmit(value, purpose, mode);
     }
   }
 
@@ -244,27 +245,51 @@ export default function PromptInput({ onSubmit, disabled, warnings, attachments 
 
   return (
     <div style={{ animation: "slide-up 0.4s ease" }}>
-      {/* Purpose Selector */}
-      <div style={{ display: "flex", gap: "var(--sp-2)", marginBottom: "var(--sp-4)" }}>
-        {["code", "content", "logical"].map((p) => (
-          <button
-            key={p}
-            onClick={() => setPurpose(p)}
-            disabled={disabled}
-            style={{
-              padding: "6px 14px",
-              background: purpose === p ? "var(--accent)" : "var(--bg-raised)",
-              border: `1px solid ${purpose === p ? "var(--accent)" : "var(--border-dim)"}`,
-              borderRadius: "var(--r-md)",
-              color: purpose === p ? "var(--bg-void)" : "var(--text-muted)",
-              fontFamily: "var(--font-mono)", fontSize: 10,
-              cursor: "pointer", letterSpacing: 1, textTransform: "uppercase",
-              transition: "all 0.2s", fontWeight: purpose === p ? 700 : 400,
-            }}
-          >
-            {p}
-          </button>
-        ))}
+      {/* Purpose & Mode Selector */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "var(--sp-4)" }}>
+        <div style={{ display: "flex", gap: "var(--sp-2)" }}>
+          {["code", "content", "logical"].map((p) => (
+            <button
+              key={p}
+              onClick={() => setPurpose(p)}
+              disabled={disabled}
+              style={{
+                padding: "6px 14px",
+                background: purpose === p ? "var(--accent)" : "var(--bg-raised)",
+                border: `1px solid ${purpose === p ? "var(--accent)" : "var(--border-dim)"}`,
+                borderRadius: "var(--r-md)",
+                color: purpose === p ? "var(--bg-void)" : "var(--text-muted)",
+                fontFamily: "var(--font-mono)", fontSize: 10,
+                cursor: "pointer", letterSpacing: 1, textTransform: "uppercase",
+                transition: "all 0.2s", fontWeight: purpose === p ? 700 : 400,
+              }}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", background: "var(--bg-surface)", border: "1px solid var(--border-soft)", borderRadius: "var(--r-md)", padding: 2 }}>
+          {["compare", "combine"].map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              disabled={disabled}
+              style={{
+                padding: "4px 12px",
+                background: mode === m ? "var(--bg-raised)" : "transparent",
+                border: "none",
+                borderRadius: "var(--r-sm)",
+                color: mode === m ? "var(--accent)" : "var(--text-muted)",
+                fontFamily: "var(--font-mono)", fontSize: 9,
+                cursor: "pointer", letterSpacing: 1, textTransform: "uppercase",
+                transition: "all 0.2s", fontWeight: mode === m ? 700 : 400,
+              }}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Main prompt box */}
@@ -388,7 +413,7 @@ export default function PromptInput({ onSubmit, disabled, warnings, attachments 
 
           <button
             disabled={!isReady}
-            onClick={() => onSubmit(value, purpose)}
+            onClick={() => onSubmit(value, purpose, mode)}
             style={{
               padding: "8px 20px",
               background: isReady ? "var(--accent)" : "var(--bg-overlay)",

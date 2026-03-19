@@ -43,6 +43,17 @@ CRITICAL RULES:
 7. Your response MUST be valid JSON matching the exact schema provided.`;
 }
 
+function buildCombineJudgeSystemPrompt() {
+  return `You are an expert technical architect and judge. Your task is to analyze a prompt, identify its logical components (e.g., Frontend, Backend, Database, CSS), and select the BEST submission for EACH specific component.
+
+CRITICAL RULES:
+1. Analyze the original prompt to identify 2-4 key logical components.
+2. For EACH component, evaluate all anonymous submissions and pick exactly ONE winner.
+3. You can pick the same submission for multiple components if it truly is the best for all, but look for specialization.
+4. Provide a brief justification for each component's winner.
+5. Your response MUST be valid JSON matching the exact schema provided.`;
+}
+
 function buildJudgeUserPrompt(originalPrompt, anonymizedOutputs) {
   const submissionsText = anonymizedOutputs
     .map(
@@ -106,6 +117,37 @@ IMPORTANT RULES:
 - Each uniqueMerit should identify something genuinely unique, not generic praise.`;
 }
 
+function buildCombineJudgeUserPrompt(originalPrompt, anonymizedOutputs) {
+  const submissionsText = anonymizedOutputs
+    .map(
+      (o) => `
+=== ${o.label} ===
+${o.content}
+${"=".repeat(40)}`
+    )
+    .join("\n\n");
+
+  const labelList = anonymizedOutputs.map((o) => o.label).join(" | ");
+
+  return `ORIGINAL PROMPT:
+"${originalPrompt}"
+
+ANONYMOUS SUBMISSIONS:
+${submissionsText}
+
+REQUIRED RESPONSE FORMAT:
+{
+  "components": [
+    {
+      "name": "<e.g., Frontend, Backend, API Design>",
+      "winner": "<one of: ${labelList}>",
+      "reason": "<1-2 sentences why this submission won for THIS component specifically>"
+    }
+  ],
+  "overallStrategy": "<How these parts should be integrated together.>"
+}`;
+}
+
 /**
  * Robustly parse JSON from LLM text, handling common formatting issues.
  */
@@ -130,7 +172,7 @@ export function robustParseJSON(text) {
       // 3. Extract the outermost {...} block using brace counting
       const startIdx = clean.indexOf("{");
       if (startIdx === -1) {
-        console.error("No JSON object found in judge response", {
+        console.error("No JSON object found in LLM response", {
           preview: text.substring(0, 300),
         });
         return null;
@@ -173,7 +215,7 @@ export function robustParseJSON(text) {
         try {
           return JSON.parse(jsonStr);
         } catch (finalErr) {
-          console.error("Failed to parse Judge JSON after all attempts", {
+          console.error("Failed to parse JSON after all attempts", {
             preview: text.substring(0, 500),
             extractedPreview: jsonStr.substring(0, 300),
             parseError: finalErr.message,
@@ -312,15 +354,49 @@ export async function runJudge(
 }
 
 /**
+ * Run a multi-component judge for 'Combine' mode.
+ */
+export async function runCombineJudge(originalPrompt, anonymizedOutputs, judgeProvider = null) {
+  const systemPrompt = buildCombineJudgeSystemPrompt();
+  const userPrompt = buildCombineJudgeUserPrompt(originalPrompt, anonymizedOutputs);
+
+  const enabledIds = await getEnabledProviders();
+  const candidates = judgeProvider
+    ? [judgeProvider]
+    : JUDGE_PRIORITY.filter((p) => enabledIds.includes(p));
+
+  let result;
+  let lastErr;
+  for (const provider of candidates) {
+    try {
+      result = await callProvider(provider, {
+        system: systemPrompt,
+        user: userPrompt,
+        temperature: 0.2,
+        maxTokens: 8000,
+        skipSanitize: true,
+      });
+      break;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (!result) throw new Error(`Combine Judge failed: ${lastErr?.message}`);
+
+  let parsed = robustParseJSON(result.text);
+  if (!parsed || !Array.isArray(parsed.components)) {
+    throw new Error("Failed to parse combine judge response.");
+  }
+
+  return {
+    components: parsed.components,
+    overallStrategy: parsed.overallStrategy,
+    tokensUsed: result.tokensUsed ?? 0,
+  };
+}
+
+/**
  * Generate a combined "best-of-all" output using the winning LLM.
- * Takes the best features from ALL submissions and synthesizes an improved answer.
- *
- * @param {string} originalPrompt - The user's original prompt
- * @param {Array<{label: string, content: string}>} anonymizedOutputs - All outputs
- * @param {Object} scores - Per-submission scores from the judge
- * @param {string} winnerLabel - Label of the winning submission
- * @param {string} [provider] - Provider to use (default: first available)
- * @returns {Promise<{combinedOutput: string, tokensUsed: number}>}
  */
 export async function generateCombinedOutput(
   originalPrompt,
@@ -378,7 +454,7 @@ Write ONLY the combined response. Do NOT include meta-commentary about the combi
         user: userPrompt,
         temperature: 0.3,
         maxTokens: 3000,
-        skipSanitize: true, // Combination output needs raw text
+        skipSanitize: true,
       });
       break;
     } catch (err) {
@@ -395,5 +471,69 @@ Write ONLY the combined response. Do NOT include meta-commentary about the combi
   return {
     combinedOutput: combinedResult.text.trim(),
     tokensUsed: combinedResult.tokensUsed ?? 0,
+  };
+}
+
+/**
+ * Synthesize a final output from component-specific winners.
+ */
+export async function runComponentCombiner(originalPrompt, anonymizedOutputs, combineJudgeResult, provider = null) {
+  const enabledIds = await getEnabledProviders();
+  const candidates = provider
+    ? [provider]
+    : JUDGE_PRIORITY.filter((p) => enabledIds.includes(p));
+
+  const componentContext = combineJudgeResult.components.map(c => {
+    const winnerOutput = anonymizedOutputs.find(o => o.label === c.winner);
+    return `
+COMPONENT: ${c.name}
+WINNING SUBMISSION: ${c.winner}
+WHY IT WON: ${c.reason}
+CONTENT FOR THIS COMPONENT:
+${winnerOutput?.content ?? "N/A"}
+${"=".repeat(40)}`;
+  }).join("\n");
+
+  const systemPrompt = `You are an expert lead engineer. Your task is to integrate multiple winning code/content components into a single, fully functional, and cohesive final project. Ensure all parts work together perfectly.`;
+
+  const userPrompt = `ORIGINAL PROMPT:
+"${originalPrompt}"
+
+I have selected the BEST parts from different AI models for this project:
+
+${componentContext}
+
+INTEGRATION STRATEGY:
+${combineJudgeResult.overallStrategy}
+
+YOUR TASK:
+1. Integrate all winning components into a SINGLE, complete, and functional response.
+2. Ensure that APIs match, data structures are consistent, and frontend-backend integration is seamless.
+3. Fix any inconsistencies caused by combining different models' work.
+4. If it's a code project, provide the FULL integrated codebase.
+5. Do NOT include meta-commentary. Provide only the final integrated result.`;
+
+  let result;
+  let lastErr;
+  for (const p of candidates) {
+    try {
+      result = await callProvider(p, {
+        system: systemPrompt,
+        user: userPrompt,
+        temperature: 0.3,
+        maxTokens: 8000,
+        skipSanitize: true,
+      });
+      break;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  if (!result) throw new Error(`Combiner failed: ${lastErr?.message}`);
+
+  return {
+    combinedOutput: result.text.trim(),
+    tokensUsed: result.tokensUsed ?? 0,
   };
 }
