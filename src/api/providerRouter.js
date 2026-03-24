@@ -1,98 +1,124 @@
 /**
  * providerRouter.js
- * Client-side API wrapper that calls the secure backend proxy.
- * 
- * CRITICAL: Never import gemini.js, groq.js, or openrouter.js directly in the client.
- * All API calls MUST go through the backend at /api/generate to protect API keys.
+ * All LLM calls are routed through the Spring Boot backend.
+ *
+ * Architecture:
+ *   Frontend (React/Vite) → Spring Boot Backend (/api/generate) → LLM APIs
+ *
+ * No API keys are exposed in the browser.
  */
 
-const API_BASE = '/api'; // Proxied to localhost:3002 in dev (see vite.config.js)
+const API_BASE = "/api";
 
 /**
- * Call the backend /api/generate endpoint.
- * @param {object} params
- * @param {string} params.prompt - User prompt
- * @param {string[]} [params.providers] - Which providers to call (default: all)
- * @param {number} [params.temperature] - LLM temperature 0-2 (default: 0.7)
- * @param {Array<{base64: string, mimeType: string}>} [params.images] - Images to send
- * @returns {Promise<{
- *   outputs: Array<{text: string, requestId: string, tokensUsed: number, providerId: string}>,
- *   failures: Array<{provider: string, error: string}>,
- *   metadata: {elapsedMs: number, providersQueried: number}
- * }>}
+ * Get the auth token from localStorage.
+ */
+function getAuthHeaders() {
+  const token = localStorage.getItem("token");
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+/**
+ * Call a single provider through the backend.
+ * @param {string} providerId - e.g. "gemini", "groq", "qwen"
+ * @param {object} params - { system, user, temperature, maxTokens }
+ * @returns {Promise<{ text: string, requestId: string, tokensUsed: number }>}
+ */
+export async function callProvider(providerId, params) {
+  const result = await generateFromProviders({
+    ...params,
+    prompt: params.user,
+    providers: [providerId],
+  });
+
+  if (result.outputs.length === 0) {
+    const failure = result.failures[0];
+    throw new Error(failure?.error || `Provider ${providerId} failed`);
+  }
+
+  return {
+    text: result.outputs[0].text,
+    requestId: result.outputs[0].requestId,
+    tokensUsed: result.outputs[0].tokensUsed || 0,
+  };
+}
+
+/**
+ * Generate from providers via the backend /api/generate endpoint.
  */
 export async function generateFromProviders({
   prompt,
   user,
   system,
-  providers = ['gemini', 'groq', 'openrouter'],
+  providers,
   temperature = 0.7,
-  maxTokens,
+  maxTokens = 2000,
   images,
-  skipSanitize,
 }) {
   const actualPrompt = prompt || user;
   if (!actualPrompt) {
-    console.error('generateFromProviders: No prompt/user provided', { prompt, user });
-    throw new Error('No prompt provided');
+    throw new Error("No prompt provided");
   }
 
-  const response = await fetch(`${API_BASE}/generate`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${localStorage.getItem('token')}`
-    },
-    body: JSON.stringify({
-      prompt: actualPrompt,
-      providers,
-      temperature,
-      images,          // Forward images to backend
-      systemPrompt: system, // Forward custom system prompt (judge uses this)
-      maxTokens,       // Forward custom max tokens (judge needs 5000+)
-      skipSanitize,    // Skip sanitization for internal calls (judge/combo)
-    }),
-  });
+  try {
+    const response = await fetch(`${API_BASE}/generate`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        prompt: actualPrompt,
+        systemPrompt: system || undefined,
+        providers: providers || undefined,
+        temperature,
+        maxTokens,
+      }),
+    });
 
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({ error: 'Unknown error' }));
-    throw new Error(err.error || `Server error: ${response.status}`);
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`Backend error ${response.status}: ${errorBody}`);
+    }
+
+    const data = await response.json();
+
+    return {
+      outputs: (data.outputs || []).map((o) => ({
+        text: o.text,
+        requestId: o.requestId,
+        tokensUsed: o.tokensUsed || 0,
+        providerId: o.providerId,
+      })),
+      failures: data.failures || [],
+      metadata: data.metadata || { elapsedMs: 0, providersQueried: 0 },
+    };
+  } catch (err) {
+    if (err.message.startsWith("Backend error")) throw err;
+    throw new Error(`Network error calling backend: ${err.message}`);
   }
-
-  return response.json();
 }
 
 /**
- * Get list of enabled providers (those with API keys on the server).
- * @returns {Promise<string[]>}
+ * Get list of enabled providers from the backend health endpoint.
  */
 export async function getEnabledProviders() {
   try {
     const response = await fetch(`${API_BASE}/health`);
+    if (!response.ok) {
+      console.warn("Health endpoint failed, returning all providers as fallback");
+      return ["qwen", "gemini", "groq", "minimax", "deepseek", "moonshot"];
+    }
+
     const data = await response.json();
-    return Object.keys(data.providers).filter(p => data.providers[p]);
-  } catch {
-    return ['gemini', 'groq', 'openrouter']; // Assume all enabled if health check fails
+    const providers = data.providers || {};
+
+    // Return only provider IDs where value is true (enabled)
+    return Object.entries(providers)
+      .filter(([, enabled]) => enabled)
+      .map(([id]) => id);
+  } catch (err) {
+    console.warn("Failed to fetch enabled providers:", err);
+    return ["qwen", "gemini", "groq", "minimax", "deepseek", "moonshot"];
   }
-}
-
-/**
- * Call a specific provider (used by judge/deliberation for targeted calls).
- * Reusable: passes arbitrary params through to generateFromProviders.
- * @param {string} providerId - 'gemini', 'groq', or 'openrouter'
- * @param {object} params - Same as generateFromProviders
- * @returns {Promise<{text: string, requestId: string, tokensUsed: number}>}
- */
-export async function callProvider(providerId, params) {
-  const result = await generateFromProviders({
-    ...params,
-    providers: [providerId]
-  });
-
-  if (result.outputs.length === 0) {
-    const failure = result.failures[0];
-    throw new Error(failure?.error || 'Provider failed');
-  }
-
-  return result.outputs[0];
 }

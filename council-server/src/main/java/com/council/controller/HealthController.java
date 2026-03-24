@@ -60,8 +60,9 @@ public class HealthController {
 
         // Providers
         var enabledProviders = generateService.getEnabledProviders();
+        var allProviders = generateService.getAllProviderIds();
         Map<String, Boolean> providers = new LinkedHashMap<>();
-        for (String p : new String[] { "gemini", "groq", "openrouter" }) {
+        for (String p : allProviders) {
             providers.put(p, enabledProviders.contains(p));
         }
 

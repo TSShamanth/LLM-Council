@@ -11,22 +11,12 @@
  */
 
 export const PROVIDERS = [
-  {
-    id: "gemini",
-    name: "Gemini",
-    icon: "◇",
-    color: "#4285F4",
-    accentDark: "rgba(66,133,244,0.12)",
-  },
-  {
-    id: "groq",
-    name: "Groq",
-    icon: "◈",
-    color: "#FF6B35",
-    accentDark: "rgba(255,107,53,0.12)",
-  },
-  { id: "openrouter", name: "OpenRouter", icon: "⬡", color: "#00D9FF", accentDark: "rgba(0,217,255,0.12)" },
-  // { id: "deepseek", name: "DeepSeek", icon: "◆", color: "#10B981", accentDark: "rgba(16,185,129,0.12)" },
+  { id: "qwen", name: "Qwen", icon: "🟣", color: "#8E24AA", accentDark: "rgba(142,36,170,0.12)" },
+  { id: "gemini", name: "Gemini", icon: "◇", color: "#4285F4", accentDark: "rgba(66,133,244,0.12)" },
+  { id: "groq", name: "Groq", icon: "◈", color: "#FF6B35", accentDark: "rgba(255,107,53,0.12)" },
+  { id: "minimax", name: "Minimax", icon: "🔴", color: "#E53935", accentDark: "rgba(229,57,53,0.12)" },
+  { id: "deepseek", name: "DeepSeek", icon: "◆", color: "#10B981", accentDark: "rgba(16,185,129,0.12)" },
+  { id: "moonshot", name: "Moonshot", icon: "🌙", color: "#FDD835", accentDark: "rgba(253,216,53,0.12)" },
 ];
 
 /** Map for O(1) lookup by id */

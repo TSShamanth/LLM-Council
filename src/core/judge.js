@@ -15,7 +15,7 @@
 import { callProvider, getEnabledProviders } from "../api/providerRouter.js";
 
 /** Judge tries these providers in order (first available) */
-const JUDGE_PRIORITY = ["gemini", "groq", "openrouter"];
+const JUDGE_PRIORITY = ["groq", "gemini", "qwen", "moonshot", "deepseek"];
 
 /** The 5 scoring dimensions used for radar charts */
 export const SCORE_DIMENSIONS = [

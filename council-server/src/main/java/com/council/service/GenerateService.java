@@ -47,6 +47,13 @@ public class GenerateService {
     }
 
     /**
+     * Get all registered provider IDs (enabled or not).
+     */
+    public List<String> getAllProviderIds() {
+        return providerMap.keySet().stream().sorted().toList();
+    }
+
+    /**
      * Check if a specific provider is enabled.
      */
     public boolean isProviderEnabled(String providerId) {
@@ -118,21 +125,22 @@ public class GenerateService {
                             "requestId", result.requestId(),
                             "tokensUsed", result.tokensUsed(),
                             "latencyMs", result.latencyMs()));
-                    
+
                     // PERSIST SUCCESS LOG FOR METRICS
-                    logRepository.save(new SystemLog("info", 
-                        "Provider " + providerId + " success", 
-                        Map.of("provider", providerId, "latency", result.latencyMs(), "tokens", result.tokensUsed())));
+                    logRepository.save(new SystemLog("info",
+                            "Provider " + providerId + " success",
+                            Map.of("provider", providerId, "latency", result.latencyMs(), "tokens",
+                                    result.tokensUsed())));
                 } else {
                     String errorMsg = "Provider returned no result or timed out";
                     failures.add(Map.of(
                             "provider", providerId,
                             "error", errorMsg));
-                    
+
                     // PERSIST ERROR LOG
-                    logRepository.save(new SystemLog("error", 
-                        "Provider " + providerId + " failed", 
-                        Map.of("provider", providerId, "error", errorMsg)));
+                    logRepository.save(new SystemLog("error",
+                            "Provider " + providerId + " failed",
+                            Map.of("provider", providerId, "error", errorMsg)));
                 }
             } catch (Exception ex) {
                 failures.add(Map.of(
