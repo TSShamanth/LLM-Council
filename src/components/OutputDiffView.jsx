@@ -47,7 +47,7 @@ function computeWordDiff(textA, textB) {
 }
 
 /* ── Diff Render ───────────────────────────────────────────────── */
-function DiffInline({ diff }) {
+function DiffInline({ diff, onTogglePart, selectedIndices }) {
     return (
         <pre style={{
             fontFamily: "var(--font-mono)",
@@ -59,30 +59,48 @@ function DiffInline({ diff }) {
             padding: "var(--sp-4)",
         }}>
             {diff.map((part, i) => {
+                const isSelected = selectedIndices.has(i);
                 if (part.type === "equal") {
                     return <span key={i} style={{ color: "var(--text-secondary)" }}>{part.text}</span>;
                 }
                 if (part.type === "add") {
                     return (
-                        <span key={i} style={{
-                            background: "rgba(34,208,122,0.15)",
-                            color: "var(--success)",
-                            borderRadius: 2,
-                            padding: "0 1px",
-                        }}>
+                        <span 
+                            key={i} 
+                            onClick={() => onTogglePart(i)}
+                            style={{
+                                background: isSelected ? "rgba(34,208,122,0.4)" : "rgba(34,208,122,0.15)",
+                                color: isSelected ? "white" : "var(--success)",
+                                borderRadius: 2,
+                                padding: "0 2px",
+                                cursor: "pointer",
+                                border: isSelected ? "1px solid var(--success)" : "1px dashed transparent",
+                                transition: "all 0.2s",
+                            }}
+                            title="Click to include in merged version"
+                        >
                             {part.text}
                         </span>
                     );
                 }
                 if (part.type === "remove") {
                     return (
-                        <span key={i} style={{
-                            background: "rgba(240,90,90,0.15)",
-                            color: "var(--danger)",
-                            textDecoration: "line-through",
-                            borderRadius: 2,
-                            padding: "0 1px",
-                        }}>
+                        <span 
+                            key={i} 
+                            onClick={() => onTogglePart(i)}
+                            style={{
+                                background: isSelected ? "rgba(240,90,90,0.4)" : "rgba(240,90,90,0.15)",
+                                color: isSelected ? "white" : "var(--danger)",
+                                textDecoration: isSelected ? "none" : "line-through",
+                                borderRadius: 2,
+                                padding: "0 2px",
+                                cursor: "pointer",
+                                border: isSelected ? "1px solid var(--danger)" : "1px dashed transparent",
+                                transition: "all 0.2s",
+                                opacity: isSelected ? 1 : 0.6,
+                            }}
+                            title="Click to keep in merged version"
+                        >
                             {part.text}
                         </span>
                     );
@@ -146,6 +164,8 @@ export default function OutputDiffView({ anonymizedOutputs, revealMap }) {
     const [leftIdx, setLeftIdx] = useState(0);
     const [rightIdx, setRightIdx] = useState(Math.min(1, labels.length - 1));
     const [mode, setMode] = useState("inline"); // 'inline' | 'side-by-side'
+    const [selectedIndices, setSelectedIndices] = useState(new Set());
+    const [mergedOutput, setMergedOutput] = useState(null);
 
     const leftOutput = anonymizedOutputs[leftIdx];
     const rightOutput = anonymizedOutputs[rightIdx];
@@ -157,8 +177,32 @@ export default function OutputDiffView({ anonymizedOutputs, revealMap }) {
 
     const diff = useMemo(() => {
         if (!leftOutput || !rightOutput) return [];
+        setSelectedIndices(new Set()); // Reset on change
+        setMergedOutput(null);
         return computeWordDiff(leftOutput.content, rightOutput.content);
     }, [leftOutput, rightOutput]);
+
+    const handleTogglePart = (idx) => {
+        const next = new Set(selectedIndices);
+        if (next.has(idx)) next.delete(idx);
+        else next.add(idx);
+        setSelectedIndices(next);
+        
+        // Generate preview
+        const merged = diff.map((part, i) => {
+            if (part.type === "equal") return part.text;
+            if (part.type === "add") return next.has(i) ? part.text : "";
+            if (part.type === "remove") return next.has(i) ? part.text : "";
+            return "";
+        }).join("");
+        setMergedOutput(merged);
+    };
+
+    const copyToClipboard = () => {
+        if (!mergedOutput) return;
+        navigator.clipboard.writeText(mergedOutput);
+        alert("Merged output copied to clipboard!");
+    };
 
     // Compute diff stats
     const addCount = diff.filter(d => d.type === "add").length;
@@ -285,7 +329,7 @@ export default function OutputDiffView({ anonymizedOutputs, revealMap }) {
                 overflow: "hidden",
             }}>
                 {mode === "inline" ? (
-                    <DiffInline diff={diff} />
+                    <DiffInline diff={diff} onTogglePart={handleTogglePart} selectedIndices={selectedIndices} />
                 ) : (
                     <div style={{ padding: "var(--sp-3)" }}>
                         <SideBySide
@@ -299,6 +343,47 @@ export default function OutputDiffView({ anonymizedOutputs, revealMap }) {
                     </div>
                 )}
             </div>
+
+            {/* Merge Preview */}
+            {mergedOutput && (
+                <div className="slide-up" style={{
+                    display: "flex", flexDirection: "column", gap: "var(--sp-3)",
+                    padding: "var(--sp-4)",
+                    background: "var(--bg-surface)",
+                    border: "1px solid var(--accent-glow)",
+                    borderRadius: "var(--r-lg)",
+                    boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+                }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div className="mono" style={{ fontSize: 10, color: "var(--accent)", letterSpacing: 2 }}>
+                            MERGE PREVIEW
+                        </div>
+                        <button
+                            onClick={copyToClipboard}
+                            style={{
+                                padding: "4px 12px",
+                                background: "var(--accent)",
+                                border: "none",
+                                borderRadius: "var(--r-md)",
+                                color: "var(--bg-void)",
+                                fontFamily: "var(--font-mono)", fontSize: 9,
+                                cursor: "pointer", fontWeight: 700,
+                            }}
+                        >
+                            COPY MERGED VERDICT
+                        </button>
+                    </div>
+                    <pre style={{
+                        fontFamily: "var(--font-mono)", fontSize: 11, lineHeight: 1.6,
+                        color: "var(--text-primary)", whiteSpace: "pre-wrap", wordBreak: "break-word",
+                        margin: 0, padding: "var(--sp-3)", background: "var(--bg-raised)",
+                        borderRadius: "var(--r-md)", border: "1px solid var(--border-dim)",
+                        maxHeight: 200, overflowY: "auto",
+                    }}>
+                        {mergedOutput}
+                    </pre>
+                </div>
+            )}
         </div>
     );
 }

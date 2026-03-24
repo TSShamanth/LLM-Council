@@ -18,9 +18,23 @@ const EXAMPLE_PROMPTS = [
   "Write a binary search tree with insert, delete, and search",
 ];
 
-const ACCEPTED_EXTENSIONS = ".txt,.md,.json,.js,.ts,.jsx,.tsx,.py,.css,.html,.csv,.jpg,.jpeg,.png,.gif,.webp,.svg,.pdf";
+const ACCEPTED_EXTENSIONS = ".txt,.md,.json,.js,.ts,.jsx,.tsx,.py,.css,.html,.csv,.jpg,.jpeg,.png,.gif,.webp,.svg,.pdf,.zip";
 const MAX_FILE_SIZE_MB = 10;
 const MAX_FILES = 5;
+
+/**
+ * Read a file as text.
+ * @param {File} file
+ * @returns {Promise<string>}
+ */
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Failed to read file as text"));
+    reader.readAsText(file);
+  });
+}
 
 /**
  * Read a file as base64 data URL. Reusable utility.
@@ -138,9 +152,10 @@ function FileBadge({ file, onRemove }) {
 export default function PromptInput({ onSubmit, disabled, warnings, attachments = [], onAttachmentsChange }) {
   const [value, setValue] = useState("");
   const [purpose, setPurpose] = useState("content");
+  const [mode, setMode] = useState("compare"); // 'compare' or 'combine'
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef(null);
-  const maxLen = 4000;
+  const maxLen = 50000;
   const remaining = maxLen - value.length;
   const isReady = value.trim().length >= 10 && !disabled && !uploading;
 
@@ -150,7 +165,7 @@ export default function PromptInput({ onSubmit, disabled, warnings, attachments 
   function handleKeyDown(e) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && isReady) {
       e.preventDefault();
-      onSubmit(value, purpose);
+      onSubmit(value, purpose, mode);
     }
   }
 
@@ -188,12 +203,29 @@ export default function PromptInput({ onSubmit, disabled, warnings, attachments 
             dataUrl,     // For preview
           });
         } else {
-          // Non-image files: upload to server for storage
+          // Non-image files: upload to server for storage AND read text content for prompt context
           const result = await uploadFileToServer(file, base64);
+          let textContent = result.textContent || null;
+          
+          if (!textContent) {
+            try {
+              // Only attempt to read if it's likely a text file
+              const textMimeTypes = ["text/", "application/json", "application/javascript", "application/x-javascript", "application/typescript", "application/xml"];
+              if (textMimeTypes.some(m => file.type.startsWith(m)) || 
+                  [".txt", ".md", ".json", ".js", ".ts", ".jsx", ".tsx", ".py", ".css", ".html", ".csv", ".yaml", ".yml"].some(ext => file.name.endsWith(ext))) {
+                textContent = await readFileAsText(file);
+              }
+
+            } catch (e) {
+              console.warn("Could not read file as text:", file.name);
+            }
+          }
+
           newAttachments.push({
             ...result,
             base64: null,
             dataUrl: null,
+            textContent, // Use server-extracted or client-read text
           });
         }
       }
@@ -213,27 +245,51 @@ export default function PromptInput({ onSubmit, disabled, warnings, attachments 
 
   return (
     <div style={{ animation: "slide-up 0.4s ease" }}>
-      {/* Purpose Selector */}
-      <div style={{ display: "flex", gap: "var(--sp-2)", marginBottom: "var(--sp-4)" }}>
-        {["code", "content", "logical"].map((p) => (
-          <button
-            key={p}
-            onClick={() => setPurpose(p)}
-            disabled={disabled}
-            style={{
-              padding: "6px 14px",
-              background: purpose === p ? "var(--accent)" : "var(--bg-raised)",
-              border: `1px solid ${purpose === p ? "var(--accent)" : "var(--border-dim)"}`,
-              borderRadius: "var(--r-md)",
-              color: purpose === p ? "var(--bg-void)" : "var(--text-muted)",
-              fontFamily: "var(--font-mono)", fontSize: 10,
-              cursor: "pointer", letterSpacing: 1, textTransform: "uppercase",
-              transition: "all 0.2s", fontWeight: purpose === p ? 700 : 400,
-            }}
-          >
-            {p}
-          </button>
-        ))}
+      {/* Purpose & Mode Selector */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "var(--sp-4)" }}>
+        <div style={{ display: "flex", gap: "var(--sp-2)" }}>
+          {["code", "content", "logical"].map((p) => (
+            <button
+              key={p}
+              onClick={() => setPurpose(p)}
+              disabled={disabled}
+              style={{
+                padding: "6px 14px",
+                background: purpose === p ? "var(--accent)" : "var(--bg-raised)",
+                border: `1px solid ${purpose === p ? "var(--accent)" : "var(--border-dim)"}`,
+                borderRadius: "var(--r-md)",
+                color: purpose === p ? "var(--bg-void)" : "var(--text-muted)",
+                fontFamily: "var(--font-mono)", fontSize: 10,
+                cursor: "pointer", letterSpacing: 1, textTransform: "uppercase",
+                transition: "all 0.2s", fontWeight: purpose === p ? 700 : 400,
+              }}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", background: "var(--bg-surface)", border: "1px solid var(--border-soft)", borderRadius: "var(--r-md)", padding: 2 }}>
+          {["compare", "combine"].map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              disabled={disabled}
+              style={{
+                padding: "4px 12px",
+                background: mode === m ? "var(--bg-raised)" : "transparent",
+                border: "none",
+                borderRadius: "var(--r-sm)",
+                color: mode === m ? "var(--accent)" : "var(--text-muted)",
+                fontFamily: "var(--font-mono)", fontSize: 9,
+                cursor: "pointer", letterSpacing: 1, textTransform: "uppercase",
+                transition: "all 0.2s", fontWeight: mode === m ? 700 : 400,
+              }}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Main prompt box */}
@@ -357,7 +413,7 @@ export default function PromptInput({ onSubmit, disabled, warnings, attachments 
 
           <button
             disabled={!isReady}
-            onClick={() => onSubmit(value, purpose)}
+            onClick={() => onSubmit(value, purpose, mode)}
             style={{
               padding: "8px 20px",
               background: isReady ? "var(--accent)" : "var(--bg-overlay)",

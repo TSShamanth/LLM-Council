@@ -6,7 +6,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
+import reactor.util.retry.Retry;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -83,6 +85,11 @@ public class GeminiProvider implements LLMProvider {
                     })
                 )
                 .bodyToMono(Map.class)
+                .retryWhen(Retry.backoff(3, Duration.ofSeconds(10))
+                        .filter(throwable -> throwable.getMessage() != null && 
+                                throwable.getMessage().contains("429"))
+                        .doBeforeRetry(signal -> log.warn("Gemini API rate limited (429). Retrying... (attempt {})", 
+                                signal.totalRetriesInARow() + 1)))
                 .map(response -> {
                     long latency = System.currentTimeMillis() - start;
                     @SuppressWarnings("unchecked")
